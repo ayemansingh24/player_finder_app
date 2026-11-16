@@ -1,0 +1,9 @@
+{
+  "name": "firebase-oauth-frontend",
+  "version": "1.0.0",
+  "description": "Simple frontend for Firebase Google OAuth",
+  "scripts": {
+    "start": "npx serve -l 3000 ."
+  }
+}
+
