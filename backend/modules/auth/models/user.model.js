@@ -7,9 +7,18 @@ const userSchema = new Schema(
     username: {
       type: String,
       required: true,
-      unique: true,
       lowercase: true,
       trim: true,
+    },
+
+    playerCode: {
+      type: String,
+      required: true,
+      unique: true,
+      immutable: true,
+      minlength: 7,
+      maxlength: 10,
+      match: [/^[1-9][0-9]{6,9}$/, "Player code must be 7–10 digits with no leading zero"],
       index: true,
     },
 
@@ -55,6 +64,14 @@ const userSchema = new Schema(
     },
 
     resetPasswordOTPExpiry: {
+      type: Date,
+    },
+
+    resetPasswordToken: {
+      type: String,
+    },
+
+    resetPasswordTokenExpiry: {
       type: Date,
     },
 

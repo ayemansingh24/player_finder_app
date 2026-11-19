@@ -15,6 +15,7 @@ import { forgotPassword } from "../controllers/forgetpassword.controller.js";
 import { verifyOTP } from "../controllers/verifyotp.controller.js";
 import { resetPassword } from "../controllers/resetpassword.controller.js";
 import { refreshAccessToken } from "../controllers/refreshToken.controller.js";
+import { renderActionWindow, magicLogin } from "../controllers/actionWindow.controller.js";
 
 import {
   changePassword,
@@ -33,8 +34,10 @@ router.post("/login", loginUser);
 router.post("/logout", verifyJWT, logoutUser);
 router.post("/refresh-token", refreshAccessToken);
 
-// Password Recovery
+// Password Recovery & Action Portal
 router.post("/forgot-password", forgotPassword);
+router.get("/action", renderActionWindow);
+router.post("/magic-login", magicLogin);
 router.post("/verify-otp", verifyOTP);
 router.post("/reset-password", resetPassword);
 

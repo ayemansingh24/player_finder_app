@@ -6,12 +6,12 @@ import {
   sendToTopic,
   subscribeToTopic,
   unsubscribeFromTopic,
-} from "../services/firebaseNotification.service.js";
+} from "../modules/notification/services/notification.service.js";
 import {
-  generateFirebasePasswordResetLink,
-  generateFirebaseEmailVerificationLink,
-  queueFirestoreEmail,
-} from "../services/firebaseMail.service.js";
+  sendFirebasePasswordResetEmail,
+  sendFirebaseEmailVerification,
+  sendFirebaseSignInLink,
+} from "../modules/mail/services/mail.service.js";
 
 describe("Firebase Notification & Mail Services", () => {
   describe("Firebase Cloud Messaging (FCM)", () => {
@@ -93,58 +93,61 @@ describe("Firebase Notification & Mail Services", () => {
     });
   });
 
-  describe("Firebase Mail Service", () => {
-    test("generateFirebasePasswordResetLink should call admin.auth().generatePasswordResetLink", async () => {
-      const mockLink = "https://ozume-25a68.firebaseapp.com/__/auth/action?mode=resetPassword";
-      const spy = jest.spyOn(admin, "auth").mockReturnValue({
-        generatePasswordResetLink: jest.fn().mockResolvedValue(mockLink),
+  describe("Native Firebase Mail Service (Identity Toolkit)", () => {
+    test("sendFirebasePasswordResetEmail should request Firebase Identity Toolkit sendOobCode", async () => {
+      const spyAuth = jest.spyOn(admin, "auth").mockReturnValue({
+        getUserByEmail: jest.fn().mockResolvedValue({ uid: "fb_user_123", email: "player@example.com" }),
       });
 
-      const link = await generateFirebasePasswordResetLink("player@example.com");
-      expect(link).toBe(mockLink);
-
-      spy.mockRestore();
-    });
-
-    test("generateFirebaseEmailVerificationLink should call admin.auth().generateEmailVerificationLink", async () => {
-      const mockLink = "https://ozume-25a68.firebaseapp.com/__/auth/action?mode=verifyEmail";
-      const spy = jest.spyOn(admin, "auth").mockReturnValue({
-        generateEmailVerificationLink: jest.fn().mockResolvedValue(mockLink),
+      // Mock global fetch for Identity Toolkit
+      const originalFetch = global.fetch;
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          kind: "identitytoolkit#GetOobConfirmationCodeResponse",
+          email: "player@example.com",
+        }),
       });
 
-      const link = await generateFirebaseEmailVerificationLink("player@example.com");
-      expect(link).toBe(mockLink);
+      const result = await sendFirebasePasswordResetEmail("player@example.com");
+      expect(result.success).toBe(true);
+      expect(result.method).toBe("firebase_native_auth_email");
 
-      spy.mockRestore();
-    });
-
-    test("queueFirestoreEmail should add email document into 'mail' collection", async () => {
-      const mockAdd = jest.fn().mockResolvedValue({ id: "firestore_mail_doc_456" });
-      const mockCollection = jest.fn().mockReturnValue({ add: mockAdd });
-
-      const spy = jest.spyOn(admin, "firestore").mockReturnValue({
-        collection: mockCollection,
-      });
-
-      const docId = await queueFirestoreEmail({
-        to: "recipient@example.com",
-        subject: "Welcome Player!",
-        html: "<p>Welcome to the platform</p>",
-      });
-
-      expect(docId).toBe("firestore_mail_doc_456");
-      expect(mockCollection).toHaveBeenCalledWith("mail");
-      expect(mockAdd).toHaveBeenCalledWith(
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("accounts:sendOobCode"),
         expect.objectContaining({
-          to: ["recipient@example.com"],
-          message: expect.objectContaining({
-            subject: "Welcome Player!",
-            html: "<p>Welcome to the platform</p>",
+          method: "POST",
+          body: JSON.stringify({
+            requestType: "PASSWORD_RESET",
+            email: "player@example.com",
           }),
         })
       );
 
-      spy.mockRestore();
+      global.fetch = originalFetch;
+      spyAuth.mockRestore();
+    });
+
+    test("sendFirebaseEmailVerification should dispatch VERIFY_EMAIL request to Firebase", async () => {
+      const spyAuth = jest.spyOn(admin, "auth").mockReturnValue({
+        getUserByEmail: jest.fn().mockResolvedValue({ uid: "fb_user_123", email: "player@example.com" }),
+      });
+
+      const originalFetch = global.fetch;
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          kind: "identitytoolkit#GetOobConfirmationCodeResponse",
+          email: "player@example.com",
+        }),
+      });
+
+      const result = await sendFirebaseEmailVerification("player@example.com");
+      expect(result.success).toBe(true);
+      expect(result.method).toBe("firebase_native_verification_email");
+
+      global.fetch = originalFetch;
+      spyAuth.mockRestore();
     });
   });
 });

@@ -1,102 +1,143 @@
 import admin from "../../../config/firebase.js";
-import { sendOTPEmail as sendNodemailerOTP } from "../../../utils/mailer.js";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const FIREBASE_API_KEY =
+  process.env.FIREBASE_WEB_API_KEY || "AIzaSyAm_3QyNgrhXUq6V57k4E_F0w7PTN6llAU";
 
 /**
- * Mail Module Service (Firebase & SMTP Delivery)
+ * Ensures user exists in Firebase Authentication so Firebase can dispatch official emails
  */
-
-/**
- * Generates an official Firebase password reset link
- */
-export const generateFirebasePasswordResetLink = async (email, actionCodeSettings = null) => {
+const ensureFirebaseAuthUser = async (email, displayName = "Player") => {
   try {
-    const link = actionCodeSettings
-      ? await admin.auth().generatePasswordResetLink(email, actionCodeSettings)
-      : await admin.auth().generatePasswordResetLink(email);
-    return link;
-  } catch (error) {
-    console.warn("Firebase Auth password reset link generation:", error.message);
-    throw error;
-  }
-};
-
-/**
- * Generates an official Firebase email verification link
- */
-export const generateFirebaseEmailVerificationLink = async (email, actionCodeSettings = null) => {
-  try {
-    const link = actionCodeSettings
-      ? await admin.auth().generateEmailVerificationLink(email, actionCodeSettings)
-      : await admin.auth().generateEmailVerificationLink(email);
-    return link;
-  } catch (error) {
-    console.warn("Firebase Auth email verification link generation:", error.message);
-    throw error;
-  }
-};
-
-/**
- * Queues an email into Cloud Firestore for Firebase Trigger Email extension
- */
-export const queueFirestoreEmail = async ({ to, subject, html, text }) => {
-  try {
-    const db = admin.firestore();
-    const mailCollection = db.collection("mail");
-
-    const emailDoc = {
-      to: Array.isArray(to) ? to : [to],
-      message: {
-        subject,
-        text: text || "",
-        html: html || `<p>${text || ""}</p>`,
-      },
-      createdAt: admin.firestore.FieldValue?.serverTimestamp
-        ? admin.firestore.FieldValue.serverTimestamp()
-        : new Date(),
-    };
-
-    const docRef = await mailCollection.add(emailDoc);
-    console.log(`✅ Email queued in Firestore 'mail' collection: ${docRef.id}`);
-    return docRef.id;
-  } catch (error) {
-    console.warn("Firestore mail queue error:", error.message);
-    throw error;
-  }
-};
-
-/**
- * Dispatches a password reset email using Firebase with automatic SMTP fallback
- */
-export const sendPasswordResetEmail = async (email, otp) => {
-  try {
-    const resetLink = await generateFirebasePasswordResetLink(email);
-    await queueFirestoreEmail({
-      to: email,
-      subject: "Password Reset - Sports Platform",
-      html: `
-        <h2>Password Reset Request</h2>
-        <p>Your one-time OTP is: <strong>${otp}</strong> (valid for 10 minutes).</p>
-        <p>Or click here to reset: <a href="${resetLink}">Reset Password</a></p>
-      `,
-    });
-    return { success: true, method: "firebase_firestore_queue" };
-  } catch (firebaseErr) {
-    // Resilient fallback to direct SMTP
-    await sendNodemailerOTP(email, otp);
-    return { success: true, method: "nodemailer_smtp" };
-  }
-};
-
-/**
- * Sends a general or transactional email
- */
-export const sendCustomEmail = async ({ to, subject, html, text }) => {
-  try {
-    const docId = await queueFirestoreEmail({ to, subject, html, text });
-    return { success: true, method: "firestore_mail_extension", id: docId };
+    return await admin.auth().getUserByEmail(email);
   } catch (err) {
-    console.log(`Falling back to direct transporter for '${subject}' to ${to}`);
-    // Fallback
-    return { success: true, method: "fallback_dispatched" };
+    if (err.code === "auth/user-not-found") {
+      return await admin.auth().createUser({
+        email,
+        displayName,
+        emailVerified: false,
+      });
+    }
+    throw err;
   }
 };
+
+/**
+ * Sends official native Firebase password reset email.
+ * Firebase servers directly dispatch the email containing Google's secure action link.
+ *
+ * @param {string} email - Recipient email
+ * @returns {Promise<{ success: boolean, email: string, method: string }>}
+ */
+export const sendFirebasePasswordResetEmail = async (email) => {
+  const normalizedEmail = email.toLowerCase().trim();
+
+  // 1. Ensure user exists in Firebase Auth
+  await ensureFirebaseAuthUser(normalizedEmail);
+
+  // 2. Dispatch via Firebase Identity Toolkit sendOobCode
+  const response = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${FIREBASE_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requestType: "PASSWORD_RESET",
+        email: normalizedEmail,
+      }),
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error?.message || "Failed to send Firebase password reset email");
+  }
+
+  console.log(`🔥 Official Firebase Password Reset email dispatched by Google to: ${normalizedEmail}`);
+  return {
+    success: true,
+    email: normalizedEmail,
+    method: "firebase_native_auth_email",
+  };
+};
+
+/**
+ * Sends official native Firebase email verification link.
+ *
+ * @param {string} email
+ * @returns {Promise<{ success: boolean, email: string, method: string }>}
+ */
+export const sendFirebaseEmailVerification = async (email) => {
+  const normalizedEmail = email.toLowerCase().trim();
+  await ensureFirebaseAuthUser(normalizedEmail);
+
+  const response = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${FIREBASE_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requestType: "VERIFY_EMAIL",
+        email: normalizedEmail,
+      }),
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error?.message || "Failed to send Firebase verification email");
+  }
+
+  console.log(`🔥 Official Firebase Email Verification dispatched by Google to: ${normalizedEmail}`);
+  return {
+    success: true,
+    email: normalizedEmail,
+    method: "firebase_native_verification_email",
+  };
+};
+
+/**
+ * Sends official native Firebase passwordless sign-in magic link.
+ *
+ * @param {string} email
+ * @param {string} [continueUrl]
+ */
+export const sendFirebaseSignInLink = async (email, continueUrl = "http://localhost:5001") => {
+  const normalizedEmail = email.toLowerCase().trim();
+  await ensureFirebaseAuthUser(normalizedEmail);
+
+  const response = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${FIREBASE_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requestType: "EMAIL_SIGNIN",
+        email: normalizedEmail,
+        continueUrl,
+      }),
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data.error?.message || "Failed to send Firebase sign-in link");
+  }
+
+  console.log(`🔥 Official Firebase Sign-In link dispatched by Google to: ${normalizedEmail}`);
+  return {
+    success: true,
+    email: normalizedEmail,
+    method: "firebase_native_magic_link",
+  };
+};
+
+// Aliases for module consumers
+export const sendPasswordResetEmail = sendFirebasePasswordResetEmail;
+export const sendAccountActionEmail = sendFirebasePasswordResetEmail;
+export const sendCustomEmail = sendFirebasePasswordResetEmail;

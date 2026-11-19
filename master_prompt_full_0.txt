@@ -1,0 +1,2614 @@
+<USER_REQUEST>
+# SPORTS MATCHMAKING PLATFORM — CORE BACKEND IMPLEMENTATION WITH H3, REDIS AND PERMANENT PLAYER CODES
+
+## 1. PROJECT OBJECTIVE
+
+Implement five integrated backend modules for my amateur sports matchmaking platform:
+
+1. Discovery Module
+2. Invitation Module
+3. Team Module
+4. Match Module
+5. Availability Module
+
+Additionally, update the existing Auth and User modules to introduce permanent, unique numeric Player Codes instead of requiring globally unique usernames.
+
+This prompt includes complete module creation, H3 architecture, six mandatory H3 edge cases and additional technical safeguards.
+
+This is an implementation task. Do not stop after creating an architectural plan.
+
+Implement clean, maintainable JavaScript code inside the existing backend.
+
+**Do not create or execute tests during this phase.**
+
+---
+
+# PART A — TECHNOLOGY AND ARCHITECTURE
+
+## 2. Technology Stack
+
+Use:
+
+- Node.js
+- Express.js
+- Plain JavaScript with ES Modules
+- MongoDB
+- Mongoose
+- Redis
+- BullMQ
+- Uber H3 using the already installed `h3-js`
+- MongoDB GeoJSON and `2dsphere` indexes
+- MongoDB Aggregation Pipelines
+- Socket.IO
+- Firebase Cloud Messaging where configured
+- Existing JWT authentication
+- Existing error-handling utilities
+- Regex for relevant string validation
+
+Do not use TypeScript.
+
+Do not introduce Firestore, microservices, NestJS, Prisma or unrelated technologies.
+
+Maintain the existing modular Express.js architecture.
+
+## 3. Inspect Existing Backend
+
+Before modifying files, inspect:
+
+- Auth Module
+- User Module
+- User model
+- UserProfile model
+- Sport model
+- UserSport model
+- Existing username validation
+- Existing login and registration logic
+- Existing MongoDB indexes
+- Existing test account records
+- Existing H3 fields
+- Redis configuration
+- JWT middleware
+- Route conventions
+- Database configuration
+- Installed package versions
+
+Reuse existing working functionality.
+
+Do not create duplicate models, utilities or middleware.
+
+Do not overwrite working authentication functionality unnecessarily.
+
+## 4. Clean Code Requirements
+
+Every module must have clearly separated responsibilities.
+
+Use:
+
+- Controllers for request/response coordination
+- Services for business logic
+- Models for persistence and database constraints
+- Validations for request validation
+- Routes for endpoint definitions
+- Dedicated pipeline files for complex aggregation queries
+- Shared utilities for genuinely reusable logic
+- Background workers for scheduled operations
+
+Requirements:
+
+- Meaningful function and variable names.
+- No unnecessary duplication.
+- No circular dependencies.
+- No controller-to-controller imports.
+- Centralized error handling.
+- Consistent HTTP responses.
+- Explicit request-field whitelists.
+- Appropriate MongoDB indexes.
+- Server-side authorization.
+- Atomic updates where required.
+- Idempotent operations where required.
+- No unnecessary overengineering.
+
+---
+
+# PART B — PERMANENT PLAYER CODE SYSTEM
+
+## 5. Remove Unique Username Requirement
+
+We have changed our user identity architecture.
+
+Earlier, users were required to create globally unique usernames.
+
+This is no longer required.
+
+Multiple users can now have the same username.
+
+Example:
+
+```javascript
+User A:
+{
+  username: "rahul",
+  playerCode: "7281946"
+}
+
+User B:
+{
+  username: "rahul",
+  playerCode: "9382715"
+}
+```
+
+Both usernames are valid because their permanent Player Codes are different.
+
+The username remains a public, changeable profile identifier.
+
+It must no longer be used as the unique identity for manual player search.
+
+## 6. Add Player Code to Existing User Model
+
+Modify the existing User schema.
+
+Do not create another User model.
+
+Add a new field:
+
+```javascript
+playerCode: {
+  type: String,
+  required: true,
+  unique: true,
+  immutable: true,
+  minlength: 7,
+  maxlength: 10,
+  match: /^[1-9][0-9]{6,9}$/
+}
+```
+
+Adjust the migration sequence so existing documents without playerCode can be safely backfilled before the final required-field and unique-index constraints are enforced.
+
+Player Code requirements:
+
+- Contains only numeric digits.
+- Minimum seven digits.
+- Maximum ten digits.
+- No leading zero.
+- Globally unique.
+- Automatically generated.
+- Cannot be manually selected.
+- Cannot be manually changed.
+- Cannot be reassigned to another player.
+- Stored as a string.
+- Remains unchanged when username, email, avatar or display name changes.
+
+Use MongoDB ObjectIds for internal database relationships.
+
+Do not replace existing ObjectIds with Player Codes.
+
+Player Code is a public lookup identifier, not a password or authentication credential.
+
+## 7. Username Schema Modification
+
+Remove username uniqueness from the existing User schema.
+
+Conceptual example:
+
+```javascript
+username: {
+  type: String,
+  required: true,
+  trim: true
+}
+```
+
+Preserve necessary username-format validation.
+
+Do not perform a duplicate-username check during registration.
+
+Do not reject registration merely because another user has the same username.
+
+Inspect all existing username-based operations and remove assumptions that username always identifies exactly one user.
+
+If the current authentication system supports username-based login, update it safely to use the existing unique email or another unambiguous authenticated identity.
+
+Do not allow duplicate usernames to authenticate as the wrong account.
+
+Preserve existing password hashes, authentication tokens, ObjectIds and user relationships.
+
+## 8. Remove Existing MongoDB Username Unique Index
+
+Removing `unique: true` from Mongoose does not automatically remove an existing MongoDB unique index.
+
+Inspect the existing User collection indexes.
+
+Identify the specific unique username index.
+
+The index may be named:
+
+```javascript
+username_1
+```
+
+Do not assume this is its actual name without inspecting the existing collection.
+
+Remove only the relevant unique username index through a controlled migration.
+
+Do not drop all collection indexes.
+
+Preserve:
+
+- MongoDB `_id` index
+- Unique email index
+- Existing authentication-related indexes
+- Other required indexes
+
+A non-unique username index may remain if necessary.
+
+Do not use destructive database reset commands.
+
+## 9. Player Code Generator
+
+Create a reusable JavaScript utility.
+
+Suggested location:
+
+```text
+utils/
+  playerCodeGenerator.js
+```
+
+Use Node.js built-in `crypto.randomInt()`.
+
+Do not require another random-number library.
+
+Do not use predictable sequential identifiers.
+
+Do not derive Player Codes from:
+
+- Email addresses
+- Phone numbers
+- Dates of birth
+- Usernames
+- Account creation timestamps
+- MongoDB ObjectIds
+
+Example candidate generation function:
+
+```javascript
+import { randomInt } from "node:crypto";
+
+export const generatePlayerCode = (digits = 7) => {
+  if (
+    !Number.isInteger(digits) ||
+    digits < 7 ||
+    digits > 10
+  ) {
+    throw new Error(
+      "Player Code must contain 7 to 10 digits"
+    );
+  }
+
+  const min = 10 ** (digits - 1);
+  const max = 10 ** digits;
+
+  return randomInt(min, max).toString();
+};
+```
+
+This function only generates a candidate code.
+
+It does not independently guarantee database-level uniqueness.
+
+## 10. Unique Code Allocation Algorithm
+
+Implement a separate allocation/retry workflow around the generator.
+
+The algorithm must:
+
+1. Generate a random seven-digit code.
+2. Check whether that Player Code is already allocated.
+3. If occupied, generate another random code.
+4. Repeat until an unused code is successfully allocated.
+5. Escalate to eight, nine or ten digits after a configurable number of collisions.
+6. Save the code with a MongoDB unique index enforcing uniqueness.
+7. If a concurrent insert creates a duplicate-key error for playerCode, generate another candidate and retry safely.
+
+Conceptual flow:
+
+```text
+User Registration
+    ↓
+Generate Random Numeric Code
+    ↓
+Check Existing Allocation
+    ↓
+Does Code Already Exist?
+    ├── Yes → Generate Another Code
+    └── No → Attempt Atomic Allocation
+                  ↓
+             Duplicate Key?
+               ├── Yes → Retry
+               └── No → Continue Registration
+```
+
+Use a configurable retry budget.
+
+Do not implement an unbounded `while(true)` loop that can hang account registration indefinitely.
+
+If the configured retry budget is exhausted, return a meaningful temporary allocation error.
+
+No duplicate Player Code may be assigned.
+
+Do not retry unrelated errors such as duplicate email, invalid password or database connection failure as though they were Player Code collisions.
+
+## 11. Concurrent Registration Protection
+
+Important scenario:
+
+Two users register simultaneously.
+
+Both random generators produce the same Player Code.
+
+Both uniqueness prechecks return no existing record.
+
+The MongoDB unique index must ensure only one allocation succeeds.
+
+The other registration must regenerate its Player Code and retry the appropriate operation.
+
+An application-level `findOne()` or `exists()` check alone is not sufficient.
+
+Handle MongoDB duplicate-key error `11000` only when it relates to the Player Code allocation.
+
+Prevent retrying registration side effects unnecessarily.
+
+For example, do not send multiple welcome emails or create multiple UserProfile records because Player Code allocation was retried.
+
+## 12. Permanent Code Non-Reuse
+
+A deleted account's Player Code must never be assigned to another user.
+
+A unique index on the User collection alone cannot guarantee non-reuse after a User document is permanently deleted.
+
+Implement a lightweight permanent code-allocation registry if necessary.
+
+Suggested internal model:
+
+```javascript
+{
+  playerCode: String,
+  allocatedAt: Date
+}
+```
+
+Use a unique index on the registry's Player Code.
+
+Keep previously allocated codes reserved.
+
+Do not store unnecessary personal information inside the registry.
+
+Choose one authoritative allocation workflow and document its consistency guarantees.
+
+The allocation registry is infrastructure supporting the existing Auth/User modules, not a sixth public application module.
+
+## 13. Backfill Existing MongoDB Users
+
+There are currently two existing development/test user records in my database.
+
+Update both records.
+
+Do not delete and recreate them.
+
+First inspect the actual database and identify all existing User documents missing a valid Player Code.
+
+For every existing user:
+
+1. Preserve the existing MongoDB ObjectId.
+2. Preserve email, password hash and username.
+3. Preserve UserProfile and UserSport relationships.
+4. Generate a unique Player Code.
+5. Save the Player Code safely.
+6. Ensure the code is reserved against reuse.
+
+Create an idempotent migration script.
+
+Suggested location:
+
+```text
+scripts/
+  migratePlayerCodes.js
+```
+
+The migration must:
+
+- Detect existing Player Codes.
+- Preserve valid codes already assigned.
+- Process missing codes.
+- Detect conflicting or malformed legacy values.
+- Avoid modifying unrelated fields.
+- Support safe reruns.
+- Verify the intended database is the existing development database before execution.
+- Avoid exposing database credentials.
+
+Execute the migration against the existing development database containing the two test accounts.
+
+If the database connection cannot be established or its environment cannot be confirmed, stop and report the blocker rather than modifying an unknown database.
+
+Create and verify the final unique Player Code index using a migration sequence appropriate for the existing data.
+
+Remove the existing unique username index.
+
+No existing account or relationship should be lost.
+
+This database migration is part of implementation, not application testing.
+
+Do not run Jest, Supertest, Postman or benchmarking.
+
+## 14. Player Code Immutability
+
+Prevent changes through:
+
+- Update profile API
+- Update account API
+- Mass assignment
+- Direct application service updates
+- Request body manipulation
+
+Mongoose immutable configuration is one layer of protection.
+
+Also enforce explicit update-field whitelists.
+
+Do not allow users or ordinary administrators to alter Player Codes through general-purpose update endpoints.
+
+## 15. Registration and Profile Responses
+
+Update registration and appropriate profile APIs to return the assigned Player Code.
+
+Example:
+
+```json
+{
+  "success": true,
+  "data": {
+    "username": "rahul",
+    "playerCode": "7281946"
+  }
+}
+```
+
+Do not expose sensitive authentication fields.
+
+The authenticated profile should allow the frontend to display, copy and share the permanent Player Code.
+
+## 16. Manual Player Code Search
+
+Replace the previous unique-username search implementation with exact Player Code search.
+
+Implement or adapt:
+
+```http
+GET /api/v1/users/search?playerCode=7281946
+```
+
+Use Regex for validation:
+
+```javascript
+const playerCodeRegex = /^[1-9][0-9]{6,9}$/;
+```
+
+Support normalizing an optional leading `#` if desired.
+
+Do not convert the code into a floating-point number.
+
+Use an exact indexed database query.
+
+Example:
+
+```javascript
+const user = await User.findOne({
+  playerCode: normalizedPlayerCode
+});
+```
+
+Do not use username to uniquely identify the target account.
+
+Do not implement unrestricted public prefix searches across numeric Player Codes.
+
+Require authentication.
+
+Use Redis-backed search rate limiting to prevent brute-force enumeration.
+
+Respect account visibility, blocking and direct-invitation preferences.
+
+The initial search result should contain:
+
+- Player Code
+- Username/display name
+- Optional avatar
+- Public user identifier
+
+When the captain opens the profile, show registered sports.
+
+When the captain selects a sport, show available sport-specific statistics.
+
+Support:
+
+```http
+GET /api/v1/users/:userId/public-profile
+GET /api/v1/users/:userId/sports/:sportSlug/stats
+```
+
+Do not fabricate verified statistics.
+
+H3 is not required for direct Player Code search.
+
+## 17. Player Code Documentation
+
+Update the existing Auth and User module Markdown documentation.
+
+Explain:
+
+- Player Code schema
+- Generator function
+- Retry algorithm
+- Seven-to-ten-digit strategy
+- Unique index
+- Concurrent registration protection
+- Permanent reservation policy
+- Existing-user migration
+- Removal of username uniqueness
+- Authentication compatibility
+- Search endpoint
+- Regex validation
+- Redis rate limiting
+
+Update every other module document that previously referred to unique username-based search.
+
+---
+
+# PART C — H3 GEOSPATIAL ARCHITECTURE
+
+## 18. H3 Resolution Strategy
+
+Use two configurable resolutions.
+
+| Resolution | Average Cell Area | Usage |
+|---|---|---|
+| 7 | Approximately 5.16 km² | Medium and larger-radius searches |
+| 8 | Approximately 0.737 km² | Small-radius searches |
+
+Configuration:
+
+```javascript
+export const H3_CONFIG = {
+  fineResolution: 8,
+  coarseResolution: 7,
+  fineSearchMaxRadiusKm: 3,
+  defaultSearchRadiusKm: 10,
+  minSearchRadiusKm: 1,
+  maxSearchRadiusKm: 20,
+  maxCandidateCells: 800,
+  enableGeoFallback: true
+};
+```
+
+Use resolution 8 for searches within 1–3 km.
+
+Use resolution 7 for searches greater than 3 km and up to 20 km.
+
+These are initial configurable engineering defaults, not measured performance guarantees.
+
+Do not assume an H3 cell or ring represents a fixed kilometre radius.
+
+## 19. Preferred Playing Location
+
+During onboarding, users choose:
+
+- Current GPS Location
+- Manually Selected Location
+
+Store the user's preferred playing location.
+
+Users do not need continuous GPS access.
+
+The saved location remains valid until updated, removed or geographical discovery is disabled.
+
+Preserve the existing GeoJSON structure.
+
+Example:
+
+```javascript
+location: {
+  geo: {
+    type: "Point",
+    coordinates: [longitude, latitude]
+  },
+  city: String,
+  state: String,
+  country: String,
+  isSharingEnabled: Boolean,
+  lastUpdatedAt: Date
+},
+
+h3Cells: {
+  res7: String,
+  res8: String
+}
+```
+
+Inspect existing H3 fields before introducing changes.
+
+Provide a safe migration for existing `h3Index` fields.
+
+## 20. Calculate H3 Cells
+
+Use the installed `h3-js` library.
+
+```javascript
+import { latLngToCell } from "h3-js";
+
+const h3Cells = {
+  res7: latLngToCell(latitude, longitude, 7),
+  res8: latLngToCell(latitude, longitude, 8)
+};
+```
+
+Calculate both resolutions independently from the original coordinates.
+
+Do not derive the geographic resolution 7 cell from the resolution 8 logical parent when actual geometric containment is required.
+
+Remember:
+
+- H3 uses latitude, longitude.
+- GeoJSON uses longitude, latitude.
+
+Calculate H3 cells on the backend.
+
+Never trust client-provided H3 identifiers.
+
+Update GeoJSON and H3 fields together.
+
+## 21. Shared H3 Utilities
+
+Create or extend:
+
+```text
+config/
+  h3.config.js
+
+utils/
+  h3.utils.js
+  geo.utils.js
+```
+
+Implement:
+
+```javascript
+validateGeoCoordinates(coordinates)
+
+calculateH3Cells(latitude, longitude)
+
+selectH3Resolution(radiusKm)
+
+getSearchCoveringCells(
+  latitude,
+  longitude,
+  radiusKm,
+  resolution
+)
+```
+
+The covering function must conservatively cover the entire geographical search radius.
+
+Inspect the installed H3 version.
+
+Use supported polygon overlap coverage or a justified conservative grid traversal strategy.
+
+Handle:
+
+- Cell boundaries
+- H3 pentagons
+- Variable cell sizes
+- Longitude wrapping
+- Polygon approximation
+- Excessive covering-cell counts
+- Invalid coordinates
+- H3 failures
+
+Do not rely on centre-only containment as guaranteed complete coverage.
+
+If coverage cannot be guaranteed, use MongoDB geospatial fallback without restrictive H3 filtering.
+
+## 22. H3 + MongoDB Search
+
+H3 identifies candidate geographical cells.
+
+MongoDB verifies actual distance.
+
+Conceptual stage:
+
+```javascript
+{
+  $geoNear: {
+    near: searchLocation,
+    key: "location.geo",
+    distanceField: "distanceMeters",
+    spherical: true,
+    maxDistance: radiusKm * 1000,
+
+    query: {
+      "location.isSharingEnabled": true,
+      [h3Field]: {
+        $in: candidateCells
+      }
+    }
+  }
+}
+```
+
+`$geoNear` must be the first aggregation stage.
+
+Preserve the MongoDB `2dsphere` index.
+
+Do not substitute H3 ring distance for actual geographical distance.
+
+---
+
+# PART D — DISCOVERY MODULE
+
+## 23. Responsibilities
+
+Discovery handles:
+
+- Player Discovery
+- Opponent Team Discovery
+- Dynamic filtering
+- H3 covering-cell calculations
+- MongoDB aggregation
+- Ranking
+- Pagination
+- Integration with direct Player Code lookup
+
+Do not place invitation acceptance or team modifications inside Discovery.
+
+## 24. Folder Structure
+
+```text
+modules/discovery/
+  controllers/
+    discovery.controller.js
+
+  services/
+    playerDiscovery.service.js
+    teamDiscovery.service.js
+
+  pipelines/
+    playerDiscovery.pipeline.js
+    teamDiscovery.pipeline.js
+
+  utils/
+    discoveryRanking.js
+
+  validations/
+    discovery.validation.js
+
+  routes/
+    discovery.routes.js
+
+  discovery.md
+```
+
+## 25. Player Discovery Flow
+
+The captain selects Find Players.
+
+The captain selects:
+
+1. Sport — mandatory.
+2. Position — optional when the sport supports positions.
+3. Optional filters.
+4. Current GPS or manually selected search location.
+
+Preserve the existing nine-sport catalogue:
+
+- Football
+- Cricket
+- Basketball
+- Badminton
+- Pickleball
+- Lawn Tennis
+- Table Tennis
+- Swimming
+- Chess
+
+Use existing Sport catalogue positions.
+
+Support Any Position.
+
+Support `not_sure` separately.
+
+Do not assume players with `not_sure` qualify for every specialist position.
+
+The five optional filters are:
+
+1. Verified rating from 1 to 5 stars.
+2. Self-declared experience from 1 to 10.
+3. Age range.
+4. Maximum distance.
+5. Gender.
+
+Without optional filters, include all otherwise eligible players within the selected/default radius.
+
+Do not unnecessarily exclude beginners or unrated players.
+
+Gender must remain voluntary.
+
+A manually selected search centre must not overwrite the captain's saved preferred location.
+
+## 26. Player Discovery API
+
+```http
+POST /api/v1/discovery/players/search
+```
+
+Example:
+
+```json
+{
+  "sport": "football",
+  "position": "midfielder",
+
+  "searchLocation": {
+    "type": "Point",
+    "coordinates": [77.45, 28.67]
+  },
+
+  "filters": {
+    "minExperience": 7,
+    "ageMin": 20,
+    "ageMax": 25,
+    "maxDistanceKm": 5,
+    "gender": "male"
+  },
+
+  "autoExpandRadius": false,
+  "page": 1,
+  "limit": 20
+}
+```
+
+Use the same endpoint for every valid combination of filters.
+
+Avoid creating separate APIs for each filter combination.
+
+## 27. Player Search Aggregation Pipeline
+
+Implement a dynamic aggregation pipeline.
+
+Do not retrieve every user and filter in Node.js.
+
+Stages:
+
+1. `$geoNear`
+2. Profile eligibility `$match`
+3. Account eligibility lookup where required
+4. UserSport `$lookup`
+5. Matching registered sport `$match`
+6. Optional verified rating filter integration
+7. Ranking calculation, if requested
+8. Final eligibility validation and `$sort`
+9. Pagination
+10. Privacy-safe `$project`
+
+### Stage 1 — Geographical Search
+
+Apply:
+
+- Search centre
+- Actual radius
+- Safe H3 covering-cell restriction
+- Discovery location permission
+
+Support MongoDB geographical fallback.
+
+### Stage 2 — Profile Eligibility
+
+Apply:
+
+- Completed onboarding
+- Discovery enabled
+- Effective availability
+- Age filters
+- Gender filters
+- Exclude requesting user
+
+Calculate age from date of birth.
+
+### Stage 3 — Account Eligibility
+
+Ensure the account exists and is enabled.
+
+Respect blocking and privacy restrictions.
+
+Join required account information from User if necessary.
+
+### Stage 4 — UserSport Lookup
+
+Resolve sport slug to the existing Sport ObjectId.
+
+Join matching UserSport records.
+
+Apply position and experience restrictions.
+
+Use appropriate ObjectId casting inside aggregation stages.
+
+### Stage 5 — Matching Sport
+
+Remove profiles without the required sport registration.
+
+Deduplicate player identities.
+
+### Stage 6 — Verified Rating
+
+The Rating Module will be implemented later.
+
+Prepare its integration point.
+
+Do not confuse experience with verified star rating.
+
+When verified ratings are unavailable, return an explicit unsupported-filter error if the captain requests `minRating`.
+
+Keep unrated players eligible when no rating filter is selected.
+
+### Stage 7 — Ranking
+
+Default: nearest first.
+
+Optional configurable relevance ranking:
+
+```javascript
+score =
+  0.7 * normalizedProximityScore +
+  0.3 * normalizedExperienceScore;
+```
+
+Do not represent this as a verified sporting ability score.
+
+### Stage 8 — Eligibility and Sorting
+
+Ensure every applicable filter is evaluated before final pagination.
+
+Do not filter only after `$limit`.
+
+Use stable deterministic sorting.
+
+### Stage 9 — Pagination
+
+Default page size: 20.
+
+Apply configurable limits.
+
+Document offset-pagination limitations and a future cursor-pagination migration path.
+
+### Stage 10 — Projection
+
+Return appropriate public fields:
+
+- User ID
+- Player Code
+- Username/display name
+- Avatar
+- Sport
+- Positions
+- Experience
+- Available verified rating
+- Coarse distance band
+- Public availability indicator
+
+Never expose:
+
+- Password
+- Email
+- Refresh tokens
+- OTPs
+- Exact private coordinates
+- Private H3 cell IDs
+- Complete date of birth
+
+## 28. Team Discovery
+
+```http
+POST /api/v1/discovery/teams/search
+```
+
+Find nearby opponent teams using:
+
+- Sport
+- Match format
+- Search centre
+- Distance
+- Supported team filters
+
+Use the Team model's preferred playing location and H3 indexes.
+
+Return active teams that allow challenges and satisfy relevant sport, format and roster eligibility requirements.
+
+Final challenge acceptance must validate both actual match lineups.
+
+Use Team Service for eligibility.
+
+Do not create matches or invitations inside Discovery.
+
+## 29. Manual Friend Search Integration
+
+Manual friend lookup now uses permanent Player Code, not unique username.
+
+Flow:
+
+```text
+Enter Player Code
+    ↓
+Find Registered User
+    ↓
+Open Public Profile
+    ↓
+View Registered Sports
+    ↓
+Select Sport
+    ↓
+View Sport-Specific Statistics
+    ↓
+Send Invitation
+```
+
+Reuse the User Module APIs.
+
+Do not duplicate User lookup or profile logic inside Discovery.
+
+## 30. Discovery Redis Usage
+
+Use Redis for:
+
+- Search rate limiting
+- Player Code lookup rate limiting
+- Sports catalogue caching
+- Optional H3 covering-cell cache
+- Non-sensitive configuration
+
+Include search centre, radius, resolution and algorithm version in H3 cache keys.
+
+If coordinates are rounded for cache reuse, preserve complete geographical coverage.
+
+Do not cache live player availability indefinitely.
+
+Do not trust cached Discovery results when authorizing invitations.
+
+---
+
+# PART E — INVITATION MODULE
+
+## 31. Responsibilities
+
+Support three invitation types:
+
+1. Individual Player Match Invitation
+2. Permanent Team Membership Invitation
+3. Opponent Team Challenge Invitation
+
+Use one Invitation Module with separate type-specific validation and acceptance logic.
+
+## 32. Structure
+
+```text
+modules/invitations/
+  models/
+    invitation.model.js
+
+  controllers/
+    invitation.controller.js
+
+  services/
+    invitation.service.js
+    invitationResponse.service.js
+
+  validations/
+    invitation.validation.js
+
+  routes/
+    invitation.routes.js
+
+  invitation.md
+```
+
+## 33. Invitation Model
+
+Include appropriate fields:
+
+- type
+- sender
+- receiverUser
+- senderTeam
+- receiverTeam
+- teamId
+- matchId
+- recruitmentRequestId
+- proposed match arrangement
+- message
+- status
+- expiresAt
+- respondedAt
+- cancelledAt
+- timestamps
+
+Types:
+
+- player_match
+- team_membership
+- team_challenge
+
+Statuses:
+
+- pending
+- accepted
+- rejected
+- expired
+- cancelled
+
+Use internal immutable User ObjectIds for references.
+
+Do not use usernames as invitation references.
+
+Player Codes are used to find accounts; internal relationships continue to use ObjectIds.
+
+Prevent duplicate pending invitations.
+
+Check expiresAt directly during acceptance even if a worker has not updated the status.
+
+## 34. Individual Player Invitation
+
+Flow:
+
+1. Captain selects player from Discovery.
+2. Backend verifies captain permissions.
+3. Validate match or recruitment request.
+4. Recheck effective availability.
+5. Validate sport/position and privacy restrictions.
+6. Check duplicate invitations and rate limits.
+7. Save pending invitation.
+8. Send notification.
+9. Player accepts or rejects.
+
+Include sport, inviting team, proposed date/time, location, position and expiration.
+
+A match invitation must not silently establish permanent team membership.
+
+## 35. Permanent Team Invitation
+
+Captain finds a known friend using their unique Player Code.
+
+The captain sends a team membership invitation.
+
+The recipient must accept.
+
+After acceptance, Team Service creates or activates confirmed membership.
+
+Geographical distance is not required.
+
+Ordinary inactive status does not automatically block direct friend invitations.
+
+Respect separate direct-invitation privacy preferences.
+
+## 36. Team Challenge Invitation
+
+Validate:
+
+- Both teams exist.
+- Teams are distinct.
+- Correct sport.
+- Supported match format.
+- Captain permissions.
+- Proposed match arrangement.
+- Registered and confirmed lineups.
+- No duplicate participants on opposing sides.
+
+After required confirmations, coordinate with Match Service to create the scheduled match.
+
+Prevent duplicate matches from repeated acceptance requests.
+
+## 37. Concurrency Protection
+
+Handle:
+
+- Simultaneous acceptance and cancellation
+- Duplicate accept requests
+- Last available roster slot
+- Expired invitations
+- Duplicate memberships
+- Partial database updates
+
+Use atomic operations or appropriate MongoDB transactions.
+
+Document replica-set requirements for transactions.
+
+Do not assume standalone MongoDB supports multi-document transactions.
+
+Require supported infrastructure or implement explicitly safe recoverable workflows.
+
+## 38. Notifications
+
+Use Socket.IO for connected clients.
+
+Use existing Firebase push integrations where configured.
+
+Persist invitations in MongoDB.
+
+Use BullMQ for appropriate asynchronous processing, retries and expiration.
+
+Do not assume push delivery is guaranteed.
+
+When a notification is opened, retrieve the current invitation state.
+
+Do not let a late notification authorize acceptance of an expired or cancelled invitation.
+
+Ordinary searches must not send mass notifications.
+
+Explicit recruitment publications may use H3-based audience targeting only with relevant eligibility, consent and anti-spam checks.
+
+## 39. Invitation Rejection and Availability
+
+After rejection, frontend asks:
+
+"Would you like to continue receiving invitations?"
+
+Options:
+
+- Stay Active
+- Inactive Until Further Notice
+- Temporarily Inactive
+- Schedule Availability
+
+Invitation Service records the rejection.
+
+Availability Service handles any selected activity change.
+
+If the user dismisses the question, preserve availability.
+
+## 40. APIs
+
+```http
+POST   /api/v1/invitations
+GET    /api/v1/invitations/received
+GET    /api/v1/invitations/sent
+GET    /api/v1/invitations/:id
+PATCH  /api/v1/invitations/:id/accept
+PATCH  /api/v1/invitations/:id/reject
+PATCH  /api/v1/invitations/:id/cancel
+```
+
+Enforce JWT authentication and resource authorization.
+
+---
+
+# PART F — TEAM MODULE
+
+## 41. Responsibilities
+
+Manage:
+
+- Temporary teams
+- Permanent teams
+- Captains
+- Registered team members
+- Team playing locations
+- H3 team indexes
+- Recruitment requests
+- Match lineup eligibility
+- Temporary-to-permanent conversion
+
+A user can belong to multiple teams.
+
+## 42. Structure
+
+```text
+modules/teams/
+  models/
+    team.model.js
+    teamMembership.model.js
+    teamRecruitmentRequest.model.js
+
+  controllers/
+    team.controller.js
+    teamMembership.controller.js
+    recruitment.controller.js
+
+  services/
+    team.service.js
+    teamMembership.service.js
+    teamEligibility.service.js
+    recruitment.service.js
+
+  validations/
+    team.validation.js
+
+  routes/
+    team.routes.js
+
+  team.md
+```
+
+## 43. Team Model
+
+Include:
+
+- name
+- sport
+- captain
+- description
+- logo
+- type
+- preferredPlayingLocation
+- h3Cells.res7
+- h3Cells.res8
+- matchFormats
+- visibility
+- challengeEnabled
+- status
+- timestamps
+
+Use a separate preferred team playing location.
+
+Do not automatically use the captain's private home address.
+
+Calculate H3 values using shared utilities.
+
+Add appropriate GeoJSON and H3 indexes.
+
+## 44. TeamMembership Model
+
+Include:
+
+- team
+- authUser
+- role
+- status
+- joinedAt
+- timestamps
+
+Only registered users may become confirmed members.
+
+Membership requires consent.
+
+Use a unique team-user relationship.
+
+One active captain per team.
+
+Captain transfer must be concurrency-safe.
+
+Preserve membership history.
+
+## 45. Create Team with Friends
+
+Captain creates a team.
+
+Captain enters each friend's permanent Player Code.
+
+The application opens the matching public profile.
+
+Captain sends membership invitations.
+
+Only accepted invitations create confirmed memberships.
+
+Duplicate usernames must not cause ambiguity because the selected account is identified by Player Code and ObjectId.
+
+## 46. Temporary and Permanent Teams
+
+Temporary teams may recruit players for a particular match.
+
+Permanent teams maintain ongoing registered membership.
+
+A temporary team can become permanent only after the necessary player consent.
+
+Do not assume accepting one match means accepting permanent membership.
+
+## 47. Team Eligibility
+
+Example:
+
+A permanent football team has ten members.
+
+For a 6v6 match, the captain selects six.
+
+Validate:
+
+- Every selected player is registered.
+- Every selected player has eligible membership.
+- Required participation consent exists.
+- No duplicate players.
+- Correct sport.
+- Correct match format.
+- Required lineup size.
+
+Prevent the same player appearing on both opposing lineups.
+
+Distinguish total permanent roster size from match lineup size.
+
+## 48. Recruitment Requests
+
+Store explicit recruitment requirements separately.
+
+Suggested fields:
+
+- team
+- captain
+- sport
+- preferredPositions
+- requiredPlayerCount
+- scheduledAt
+- durationMinutes
+- playingLocation
+- acceptedPlayerCount
+- status
+- optional match reference
+
+Use atomic capacity management.
+
+Do not create recruitment records every time someone searches.
+
+## 49. APIs
+
+```http
+POST   /api/v1/teams
+GET    /api/v1/teams/my-teams
+GET    /api/v1/teams/:teamId
+PATCH  /api/v1/teams/:teamId
+GET    /api/v1/teams/:teamId/members
+DELETE /api/v1/teams/:teamId/members/:userId
+POST   /api/v1/teams/:teamId/transfer-captain
+POST   /api/v1/teams/:teamId/recruitment
+GET    /api/v1/teams/:teamId/recruitment
+PATCH  /api/v1/teams/:teamId/recruitment/:requestId
+GET    /api/v1/teams/:teamId/eligibility
+POST   /api/v1/teams/:teamId/convert-to-permanent
+```
+
+Enforce captain authorization.
+
+Preserve historical match records when memberships change.
+
+Do not duplicate Invitation APIs.
+
+---
+
+# PART G — MATCH MODULE
+
+## 50. Responsibilities
+
+Manage:
+
+- Match creation
+- Scheduling
+- Match participants
+- Match formats
+- Venue/location
+- Match start/end
+- Live scoring
+- Match events
+- Result confirmation
+- Disputes
+- Historical participation
+
+## 51. Structure
+
+```text
+modules/matches/
+  models/
+    match.model.js
+    matchParticipant.model.js
+    matchEvent.model.js
+
+  controllers/
+    match.controller.js
+    matchScore.controller.js
+
+  services/
+    match.service.js
+    matchLifecycle.service.js
+    matchScoring.service.js
+    matchVerification.service.js
+
+  scoring/
+    football.scoring.js
+    cricket.scoring.js
+    basketball.scoring.js
+    racketSports.scoring.js
+    otherSports.scoring.js
+
+  validations/
+    match.validation.js
+
+  routes/
+    match.routes.js
+
+  match.md
+```
+
+Only create scoring handlers for implemented responsibilities.
+
+Do not create empty files that falsely imply complete sport support.
+
+## 52. Match Model
+
+Include:
+
+- sport
+- teamA
+- teamB
+- originating arrangement/challenge
+- matchFormat
+- scheduledAt
+- durationMinutes
+- venue
+- scorekeeper
+- status
+- score summary
+- startedAt
+- endedAt
+- verification data
+- verified result
+- optional tournament reference
+- timestamps
+
+Use appropriate participant structures for individual sports.
+
+## 53. Match Participants
+
+Store:
+
+- match
+- authUser
+- team or participant side
+- participation status
+- confirmation status
+- match-specific statistics
+
+Use registered immutable User references.
+
+Historical statistics must not disappear when a player leaves a team or changes their username.
+
+Prevent duplicate participation.
+
+## 54. Match Lifecycle
+
+```text
+proposed
+    ↓
+scheduled
+    ↓
+live
+    ↓
+pending_verification
+    ↓
+completed
+```
+
+Also handle:
+
+- cancelled
+- disputed
+- forfeited
+
+Enforce valid transitions.
+
+Prevent unauthorized status changes.
+
+Verify lineup eligibility before match confirmation and start.
+
+Use authoritative server timestamps.
+
+## 55. Live Scoring
+
+Use Socket.IO for real-time updates.
+
+Store persistent scores and events in MongoDB.
+
+Implement sport-specific scoring strategies.
+
+Football:
+
+- Goals
+- Match clock
+- Team scores
+- Result
+
+Cricket:
+
+- Runs
+- Wickets
+- Overs
+- Legal deliveries
+- Extras
+- Innings
+- Result
+
+Basketball:
+
+- Points
+- Periods
+- Result
+
+Racket sports:
+
+- Points
+- Games
+- Sets
+
+Chess and Swimming:
+
+- Appropriate result structures
+- Format-specific validation
+
+Explicitly reject unsupported formats.
+
+H3 is not required for scoring or result verification.
+
+## 56. MatchEvent Model
+
+Include:
+
+- match
+- sport
+- eventType
+- team or participant side
+- player
+- eventData
+- recordedBy
+- serverTimestamp
+- clientEventId
+- correctionReference
+
+Use idempotent event handling.
+
+Prevent duplicate events from network retries.
+
+Keep score summaries and event persistence consistent.
+
+Only authorized scorekeepers can record ordinary scoring events.
+
+## 57. Final Result Verification
+
+After match completion:
+
+1. Scorekeeper submits final result.
+2. Both captains independently confirm the same result version.
+3. Complete the match only after required confirmations.
+4. If either disputes, mark disputed.
+5. Authorized administrator resolves disputes.
+6. Preserve an audit trail.
+
+If the proposed result changes, previous confirmations must not apply automatically.
+
+For individual sports, implement an appropriate alternative verification policy.
+
+Do not implement the complete Tournament or Rating Module yet.
+
+## 58. APIs
+
+```http
+POST   /api/v1/matches
+GET    /api/v1/matches/my-matches
+GET    /api/v1/matches/:matchId
+PATCH  /api/v1/matches/:matchId/schedule
+POST   /api/v1/matches/:matchId/start
+POST   /api/v1/matches/:matchId/events
+GET    /api/v1/matches/:matchId/score
+POST   /api/v1/matches/:matchId/end
+POST   /api/v1/matches/:matchId/confirm-result
+POST   /api/v1/matches/:matchId/dispute-result
+POST   /api/v1/matches/:matchId/resolve-dispute
+```
+
+Enforce authorization and lifecycle rules.
+
+Register static routes before conflicting parameter routes.
+
+---
+
+# PART H — AVAILABILITY MODULE
+
+## 59. Responsibilities
+
+Support:
+
+1. Stay Active
+2. Inactive Until Further Notice
+3. Temporarily Inactive
+4. Scheduled Availability
+
+Availability is independent of online presence.
+
+A user can be offline but available for invitations.
+
+Closing the app or disabling GPS must not automatically change availability.
+
+## 60. Structure
+
+```text
+modules/availability/
+  controllers/
+    availability.controller.js
+
+  services/
+    availability.service.js
+    availabilitySchedule.service.js
+
+  utils/
+    availabilityCalculator.js
+
+  jobs/
+    availability.queue.js
+    availability.worker.js
+
+  validations/
+    availability.validation.js
+
+  routes/
+    availability.routes.js
+
+  availability.md
+```
+
+## 61. Availability Model Integration
+
+Extend existing UserProfile availability fields.
+
+Store:
+
+- Base mode
+- Manual indefinite inactivity override
+- Temporary pause expiration
+- One-time schedules
+- Recurring schedules
+- IANA timezone
+- Effective status where materialized
+- Next transition
+- Schedule version
+- Updated timestamp
+
+Do not create duplicate independent availability stores.
+
+## 62. Effective Availability Calculation
+
+Implement one authoritative method:
+
+```javascript
+getEffectiveAvailability(userId, atTime)
+```
+
+Priority:
+
+1. Manual indefinite inactivity
+2. Temporary pause
+3. Applicable one-time schedule
+4. Recurring schedule
+5. Base manual preference
+
+When a temporary pause expires, recompute underlying availability.
+
+Do not blindly activate the user.
+
+Keep general invitation availability separate from confirmed match-time commitments.
+
+## 63. Scheduling
+
+Support:
+
+- Active after 6 PM
+- Inactive after 10 PM
+- Pause for two hours
+- Active daily from 6 PM to 10 PM
+- Active on selected weekdays
+- Active only on weekends
+
+Handle:
+
+- Overnight windows
+- Timezones
+- Conflicting schedules
+- Edits and cancellations
+- Daylight-saving changes where relevant
+- Invalid time ranges
+
+Define deterministic one-time and recurring schedule interactions.
+
+## 64. Redis and BullMQ
+
+MongoDB stores permanent availability rules.
+
+Use Redis and BullMQ for scheduled transitions.
+
+Implement:
+
+- Separate worker entry point
+- Stable job identifiers
+- Schedule versioning
+- Duplicate job prevention
+- Stale job detection
+- Retry behavior
+- Restart recovery
+- Periodic reconciliation
+
+Workers must recompute correct current availability.
+
+Do not blindly apply an outdated scheduled status.
+
+Do not depend on the React Native application running.
+
+Discovery and Invitation must use equivalent availability rules.
+
+If materialized availability becomes stale, use a correct fallback and synchronization strategy.
+
+## 65. APIs
+
+```http
+GET    /api/v1/availability/me
+PATCH  /api/v1/availability/me
+POST   /api/v1/availability/me/pause
+DELETE /api/v1/availability/me/pause
+PUT    /api/v1/availability/me/schedule
+GET    /api/v1/availability/me/schedule
+DELETE /api/v1/availability/me/schedule
+```
+
+Use authenticated user identity.
+
+Preserve existing User availability API compatibility where applicable.
+
+---
+
+# PART I — SIX MANDATORY H3 EDGE CASES
+
+## 66. Empty Centre Hexagon
+
+If the captain's immediate H3 cell contains no players, search all cells covering the selected radius.
+
+Do not return false empty results.
+
+If no eligible players exist within the complete selected radius, offer expansion.
+
+Example:
+
+- 5 km
+- 10 km
+- 15 km
+- 20 km
+
+Do not silently expand beyond the user's selected distance.
+
+Automatic expansion requires explicit permission.
+
+Return the actual final radius used.
+
+If implementing ring traversal, handle pentagons, cell boundaries and distortion.
+
+## 67. Duplicate Reads During Expansion
+
+Naive cumulative `gridDisk` expansion repeatedly includes previously searched inner cells.
+
+For fixed-radius searches, prefer one complete H3 cover and one indexed aggregation query.
+
+For progressive searches:
+
+- Track visited cells.
+- Deduplicate candidate and returned user IDs.
+- Avoid per-cell database queries.
+- Use bounded query budgets.
+
+Important:
+
+A previously searched cell may partially overlap the newly expanded radius.
+
+Querying only newly visited cells can miss eligible players.
+
+Use appropriate geographical distance annuli and complete cell coverage when incremental radius expansion is implemented.
+
+Do not sacrifice search completeness to avoid repeated queries.
+
+## 68. Excessive H3 Candidate Cells
+
+Firestore's fixed 30-item disjunction limitation does not apply directly to this MongoDB architecture.
+
+Do not introduce Firestore batching.
+
+Large MongoDB `$in` arrays can still be expensive.
+
+Enforce configurable candidate-cell limits.
+
+Deduplicate cell IDs.
+
+If the threshold is exceeded, prefer MongoDB `$geoNear` fallback.
+
+Do not truncate the covering-cell list.
+
+If batching is introduced later, preserve complete coverage, global ordering, deduplication and pagination.
+
+## 69. Dense City vs Sparse Town
+
+Use configurable resolution 7 and 8 initially.
+
+Dense areas may contain thousands of players per cell.
+
+Sparse areas may contain very few.
+
+For dense areas:
+
+- Apply appropriate indexed filters.
+- Use indexed sport lookups.
+- Restrict fields.
+- Paginate.
+- Avoid loading every player into Node.js.
+
+For sparse areas:
+
+- Search complete approved radius.
+- Return valid empty results.
+- Offer explicit radius expansion.
+
+Redis may store non-sensitive aggregate density metrics.
+
+Do not overengineer dynamic density prediction initially.
+
+Do not assume finer H3 resolutions always improve performance.
+
+## 70. MongoDB Indexing
+
+Review appropriate indexes for:
+
+User:
+
+- Unique Player Code
+- Unique email
+- Non-unique username where useful
+
+UserProfile:
+
+- GeoJSON `2dsphere`
+- H3 resolution 7
+- H3 resolution 8
+- Relevant discovery eligibility fields
+
+UserSport:
+
+- Unique authUser and sport
+- Sport lookup
+- Positions
+- Experience
+
+Team:
+
+- GeoJSON
+- H3 cells
+- Sport
+- Team status
+- Challenge eligibility
+
+TeamMembership:
+
+- Unique team-user relationship
+- Membership status
+
+Invitation:
+
+- Recipient/sender
+- Type
+- Status
+- Expiration
+- Duplicate-prevention constraints
+
+Match:
+
+- Originating arrangement
+- Participants
+- Status
+- Schedule
+
+MatchEvent:
+
+- Match
+- Unique event identification
+
+Do not create redundant indexes for every possible filter combination.
+
+Do not claim that independent H3 and geospatial indexes automatically provide optimal combined performance.
+
+Document intended query plans.
+
+Actual benchmarking will happen later.
+
+## 71. Location Privacy and Spoofing
+
+Validate:
+
+- Finite numeric coordinates
+- Latitude from -90 to 90
+- Longitude from -180 to 180
+- Valid GeoJSON structure
+- Correct coordinate order
+
+Reject malformed coordinate arrays and injection attempts.
+
+Calculate H3 indexes server-side.
+
+Do not expose:
+
+- Exact private GPS coordinates
+- Home addresses
+- Fine-resolution H3 identifiers
+- Private location histories
+
+Return locality, city and coarse distance bands.
+
+Apply rate limiting to repeated searches with changing centres to reduce triangulation attacks.
+
+Use controlled location update rates.
+
+Manual preferred playing locations are not necessarily current physical locations.
+
+Do not automatically treat them as GPS spoofing.
+
+Perfect spoofing detection is not possible.
+
+---
+
+# PART J — ADDITIONAL TECHNICAL SAFEGUARDS
+
+## 72. Missing H3 Data
+
+Backfill existing UserProfile records missing required H3 fields when valid geographical coordinates exist.
+
+Preserve old records.
+
+Use geographical fallback during migration.
+
+## 73. H3 and GeoJSON Inconsistency
+
+Update them together.
+
+Prevent stale asynchronous writes from overwriting newer location information.
+
+## 74. Availability Changes During Search
+
+Recheck authoritative availability before sending ordinary match invitations.
+
+Do not trust cached search results.
+
+## 75. Concurrent Invitations
+
+Prevent:
+
+- Duplicate invitation acceptance
+- Duplicate membership
+- Overfilled roster slots
+- Invalid acceptance after cancellation
+- Invalid acceptance after expiry
+
+## 76. Disabled or Deleted Users
+
+Exclude them from new Discovery results and invitations.
+
+Preserve necessary historical match integrity.
+
+Never reassign their old Player Codes.
+
+## 77. H3 Boundary Errors
+
+Guarantee complete conservative cell coverage or use MongoDB geospatial fallback.
+
+## 78. Pagination
+
+Use deterministic sorting and deduplication.
+
+Document changing-data limitations.
+
+Do not falsely promise stable snapshots from offset pagination.
+
+## 79. Redis Failure
+
+MongoDB remains authoritative.
+
+Do not bypass rate limits or authorization silently.
+
+Recover delayed jobs appropriately.
+
+## 80. H3 Errors
+
+Handle H3 failures explicitly.
+
+Use correct geospatial fallback.
+
+Do not return false empty results.
+
+## 81. Empty Results
+
+Differentiate valid empty results from:
+
+- Invalid input
+- Invalid location
+- Unsupported rating filter
+- Database failure
+- Dependency failure
+
+Do not fabricate reasons for empty search results.
+
+---
+
+# PART K — VALIDATION, REGEX AND SECURITY
+
+## 82. Regex
+
+Use appropriate Regex validation.
+
+Player Code:
+
+```javascript
+const playerCodeRegex =
+  /^[1-9][0-9]{6,9}$/;
+```
+
+Username format, if consistent with the existing policy:
+
+```javascript
+const usernameRegex =
+  /^[a-zA-Z0-9_]{3,20}$/;
+```
+
+Sport and position slug:
+
+```javascript
+const slugRegex =
+  /^[a-z]+(?:_[a-z]+)*$/;
+```
+
+Username validation must not enforce global uniqueness.
+
+Use database indexes for uniqueness guarantees.
+
+Use catalogue validation for valid positions and sports.
+
+Do not use Regex as a substitute for numeric/date/ObjectId validation.
+
+## 83. Injection Protection
+
+Do not pass arbitrary request bodies directly into MongoDB queries.
+
+Use explicit validated field whitelists.
+
+Do not accept arbitrary user-defined Regex patterns.
+
+Do not accept arbitrary MongoDB operators or aggregation stages from the client.
+
+## 84. Redis Rate Limiting
+
+Implement configurable limits for:
+
+- Player Discovery
+- Team Discovery
+- Player Code lookup
+- Invitation creation
+- Location changes
+- Other abuse-sensitive operations
+
+Apply appropriate user-based and IP-based limits.
+
+Prevent Player Code enumeration and repeated invitation spam.
+
+## 85. Authorization
+
+Verify:
+
+- JWT identity
+- Account status
+- Resource ownership
+- Team captain role
+- Invitation sender/recipient
+- Scorekeeper permissions
+- Match verification authority
+- Administrator permissions
+
+Never trust submitted roles or user ownership from the frontend.
+
+---
+
+# PART L — CROSS-MODULE INTEGRATION
+
+## 86. Player Discovery Flow
+
+```text
+React Native
+    ↓
+JWT Middleware
+    ↓
+Redis Rate Limiting
+    ↓
+Validation
+    ↓
+Discovery Controller
+    ↓
+Player Discovery Service
+    ↓
+Sport Validation
+    ↓
+H3 Resolution Selection
+    ↓
+H3 Covering Cells
+    ↓
+MongoDB Aggregation Pipeline
+    ↓
+Sport + Position + Optional Filters
+    ↓
+Effective Availability
+    ↓
+Ranking + Pagination
+    ↓
+Privacy-Safe Results
+```
+
+## 87. Direct Friend Search
+
+```text
+Captain Enters Player Code
+    ↓
+Exact Indexed User Lookup
+    ↓
+Open Public Profile
+    ↓
+Select Sport
+    ↓
+View Sport Statistics
+    ↓
+Send Team Invitation
+    ↓
+Friend Accepts
+    ↓
+Confirmed Team Membership
+```
+
+## 88. Opponent Team Flow
+
+```text
+Team Discovery
+    ↓
+Find Eligible Opponent
+    ↓
+Send Team Challenge
+    ↓
+Opponent Captain Accepts
+    ↓
+Verify Both Lineups
+    ↓
+Create Scheduled Match
+    ↓
+Live Scoring
+    ↓
+Result Confirmation
+```
+
+## 89. Availability Flow
+
+```text
+User Saves Schedule
+    ↓
+Availability Service
+    ↓
+MongoDB
+    ↓
+Redis + BullMQ
+    ↓
+Worker Processes Transition
+    ↓
+Recompute Effective Availability
+    ↓
+Discovery Uses Correct Status
+```
+
+---
+
+# PART M — DOCUMENTATION
+
+## 90. Mandatory Module Documentation
+
+Create:
+
+```text
+modules/discovery/discovery.md
+modules/invitations/invitation.md
+modules/teams/team.md
+modules/matches/match.md
+modules/availability/availability.md
+```
+
+Additionally update the existing Auth and User documentation to describe the new Player Code system.
+
+These documents must describe actual implemented code.
+
+Every module document must include:
+
+1. Purpose
+2. Responsibilities
+3. Folder structure
+4. Models
+5. Database relationships
+6. Controllers
+7. Service functions
+8. APIs
+9. Request examples
+10. Response examples
+11. Complete request flow
+12. MongoDB queries
+13. Indexes
+14. Redis usage
+15. Regex and validation
+16. Authorization
+17. Security considerations
+18. Edge cases
+19. Integration dependencies
+20. Environment variables
+21. Known limitations
+22. Testing status
+23. Future improvements
+
+Discovery documentation must additionally explain H3 covering logic, resolutions, exact radius filtering, all six H3 edge cases, dynamic aggregation and direct Player Code search.
+
+Invitation documentation must explain all three invitation types, state transitions and concurrency.
+
+Team documentation must explain temporary/permanent teams, Player Code-based friend invitations, membership and eligibility.
+
+Match documentation must explain lifecycle, scoring, result verification and disputes.
+
+Availability documentation must explain schedule modes, manual overrides, BullMQ and worker recovery.
+
+Auth/User documentation must explain:
+
+- Username no longer being unique
+- Permanent numeric Player Code
+- Code generation
+- Collision handling
+- Unique index
+- Allocation registry where used
+- Existing-user migration
+- Exact Player Code search
+
+Do not leave references to unique usernames as the current identity architecture.
+
+---
+
+# PART N — PERFORMANCE AND OBSERVABILITY
+
+## 91. Logging and Metrics
+
+Track relevant metrics:
+
+- Discovery requests
+- Search radius
+- Selected H3 resolution
+- Covering-cell count
+- H3 fallback frequency
+- Query duration
+- Returned result count
+- Rate-limit rejections
+- Player Code allocation collisions
+- Invitation failures
+- Worker failures
+- Availability synchronization errors
+
+Do not expose tokens, password hashes, OTPs, private coordinates or sensitive request bodies.
+
+Avoid expensive database counts solely for logging.
+
+Document future benchmarking requirements.
+
+---
+
+# PART O — IMPLEMENTATION ORDER
+
+## 92. Recommended Internal Order
+
+1. Inspect existing backend and database.
+2. Implement Player Code utility and allocation logic.
+3. Update existing User schema and authentication assumptions.
+4. Backfill existing development/test users.
+5. Create final unique Player Code index.
+6. Remove existing unique username index.
+7. Update direct player search APIs.
+8. Establish shared H3 and Redis configuration.
+9. Extend UserProfile geographical fields.
+10. Implement Team models and eligibility services.
+11. Implement Availability logic and scheduling.
+12. Implement Discovery pipelines.
+13. Implement Invitation workflows.
+14. Implement Match services.
+15. Complete cross-module integrations.
+16. Integrate routes, workers and notifications.
+17. Complete all module documentation.
+
+Adjust this order where necessary to ensure database index migrations remain safe and unique code allocation is enforced throughout.
+
+Avoid circular dependencies.
+
+Do not rewrite existing working functionality without a reason.
+
+---
+
+# PART P — STRICT SCOPE RESTRICTIONS
+
+## 93. Restrictions
+
+- Plain JavaScript ES Modules only.
+- MongoDB only.
+- No Firestore.
+- No microservices.
+- No TypeScript.
+- No duplicate User models.
+- No unique username requirement.
+- No user-editable Player Codes.
+- No reassignment of previously allocated Player Codes.
+- No destructive database resets.
+- Preserve both existing test accounts.
+- Preserve existing ObjectIds and relationships.
+- Preserve the existing nine-sport catalogue.
+- Do not implement the complete Rating Module.
+- Do not implement the complete Tournament Module.
+- Do not implement Turf Booking payments.
+- Do not implement unrelated AI functionality.
+- Do not fabricate verified statistics.
+- Do not claim unsupported scoring formats are complete.
+- Do not expose private location data.
+- Do not use H3 as a replacement for precise geographical radius verification.
+
+The separate broader application-wide edge-case review will happen after this implementation phase.
+
+## 94. No Testing Yet
+
+Do not create or execute:
+
+- Jest tests
+- Supertest tests
+- Postman test collections
+- API integration tests
+- Load tests
+- Performance benchmarks
+
+The existing-user migration is authorized for the existing development database.
+
+Database migration verification is allowed only to confirm that intended records and indexes were updated safely.
+
+Do not treat this as permission to execute the application testing phase.
+
+Do not claim any functionality has passed testing.
+
+---
+
+# PART Q — FINAL DELIVERABLES
+
+## 95. Implementation Report
+
+After completing the implementation, report:
+
+### Existing User Model Changes
+
+- Player Code field
+- Username uniqueness removal
+- Login compatibility changes
+- New indexes
+
+### Player Code Implementation
+
+- Generator utility
+- Allocation workflow
+- Collision retry logic
+- Concurrency protection
+- Seven-to-ten-digit strategy
+- Non-reuse policy
+
+### Database Migration
+
+- Number of existing users found
+- Number of Player Codes allocated
+- Confirmation of preservation of existing ObjectIds
+- Username unique index removal status
+- Player Code unique index status
+- Any failed or pending migration records
+
+Do not expose sensitive account information.
+
+### Five Core Modules
+
+Explain all files created and modified.
+
+List models, services, controllers and APIs.
+
+### H3 Architecture
+
+Explain:
+
+- Resolution selection
+- H3 cell generation
+- Covering algorithm
+- Exact MongoDB radius filtering
+- Cell budgets
+- Expansion behavior
+- Fallback strategy
+
+### Discovery Pipeline
+
+Show the actual implemented MongoDB aggregation pipeline.
+
+Explain each stage.
+
+### Redis and BullMQ
+
+Explain configuration, rate limits, queues, jobs, worker commands and failure recovery.
+
+### Module Documentation
+
+Confirm all five new module Markdown documents and existing Auth/User documentation updates.
+
+### Edge Cases
+
+Report implementation status for each of the six mandatory H3 edge cases and additional technical safeguards.
+
+### Honest Implementation Status
+
+Clearly distinguish:
+
+- Implemented functionality
+- Unconfigured integrations
+- Pending migrations
+- Unsupported formats
+- Incomplete functionality
+- Unverified functionality
+- Future improvements
+
+### Testing Status
+
+Explicitly confirm:
+
+"Automated testing, API testing and performance benchmarking have intentionally not been performed during this implementation phase."
+
+---
+
+# FINAL OBJECTIVE
+
+Deliver a clean, maintainable and integrated sports matchmaking backend with:
+
+- Five core modules
+- Permanent unique numeric Player Codes
+- Non-unique usernames
+- Safe migration of existing users
+- H3 geospatial architecture
+- MongoDB aggregation pipelines
+- Redis rate limiting
+- BullMQ scheduled availability
+- Socket.IO communication
+- Appropriate Regex validation
+- Six mandatory H3 edge-case protections
+- Detailed module documentation
+
+Implement the actual backend code.
+
+Preserve existing data.
+
+Prioritize correctness, privacy, data integrity and maintainability.
+
+Do not execute the testing phase yet.
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-11-18T12:44:50+05:30.
+
+The user's current state is as follows:
+Active Document: /Users/ayemansingh/Desktop/Projects/sport-project/backend/package.json (LANGUAGE_UNSPECIFIED)
+Cursor is on line: 1
+Other open documents:
+- /Users/ayemansingh/Desktop/Projects/sport-project/backend/package-lock.json (LANGUAGE_UNSPECIFIED)
+- /Users/ayemansingh/Desktop/Projects/sport-project/backend/modules/user/services/user.service.js (LANGUAGE_UNSPECIFIED)
+- /Users/ayemansingh/Desktop/Projects/sport-project/backend/tests/user.api.test.js (LANGUAGE_UNSPECIFIED)
+- /Users/ayemansingh/Desktop/Projects/sport-project/backend/tests/sports.test.js (LANGUAGE_UNSPECIFIED)
+- /Users/ayemansingh/Desktop/Projects/sport-project/backend/modules/user/models/userProfile.model.js (LANGUAGE_UNSPECIFIED)
+</ADDITIONAL_METADATA>

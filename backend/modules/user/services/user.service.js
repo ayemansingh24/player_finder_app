@@ -1,7 +1,9 @@
 import fs from "fs";
 import { UserProfile } from "../models/userProfile.model.js";
-import { calculateH3Index } from "../../../utils/h3.utils.js";
+import { UserSport } from "../../userSports/models/userSport.model.js";
+import { calculateH3Index, calculateH3Cells } from "../../../utils/h3.utils.js";
 import cloudinary from "../../../utils/cloudinary.js";
+import { EXPERIENCE_RATING } from "../../../config/sports.config.js";
 
 /**
  * Idempotently creates an initial UserProfile for an authenticated user.
@@ -19,7 +21,6 @@ export const createInitialProfile = async (authUser) => {
   const initialDisplayName = (authUser.fullName && authUser.fullName.trim()) || authUser.username || "Player";
 
   try {
-    // $setOnInsert guarantees existing profiles are never overwritten on retries
     const profile = await UserProfile.findOneAndUpdate(
       { authUser: authUserId },
       {
@@ -27,7 +28,6 @@ export const createInitialProfile = async (authUser) => {
           authUser: authUserId,
           displayName: initialDisplayName,
           onboardingCompleted: false,
-          sportsProfiles: [],
           availability: {
             status: "offline",
             updatedAt: new Date(),
@@ -41,14 +41,13 @@ export const createInitialProfile = async (authUser) => {
       },
       {
         upsert: true,
-        new: true,
+        returnDocument: "after",
         setDefaultsOnInsert: true,
       }
     );
 
     return profile;
   } catch (error) {
-    // Gracefully handle duplicate key race condition (E11000)
     if (error.code === 11000) {
       return await UserProfile.findOne({ authUser: authUserId });
     }
@@ -57,7 +56,8 @@ export const createInitialProfile = async (authUser) => {
 };
 
 /**
- * Fetches the complete private profile for the logged-in player
+ * Fetches the complete private profile for the logged-in player,
+ * including their registered sports from the UserSport collection.
  */
 export const getMyProfile = async (authUserId) => {
   let profile = await UserProfile.findOne({ authUser: authUserId }).populate("authUser", "username email");
@@ -75,14 +75,36 @@ export const getMyProfile = async (authUserId) => {
     await profile.populate("authUser", "username email");
   }
 
-  return profile;
+  // Populate registered sports from UserSport collection
+  const userSports = await UserSport.find({ authUser: authUserId })
+    .populate("sport", "name slug hasPositions positions")
+    .sort({ isPrimarySport: -1, createdAt: 1 });
+
+  const profileObj = profile.toObject();
+  profileObj.sports = userSports.map((us) => ({
+    id: us._id,
+    sport: us.sport?.name,
+    slug: us.sport?.slug,
+    hasPositions: us.sport?.hasPositions,
+    preferredPositions: us.preferredPositions,
+    experienceLevel: us.experienceLevel,
+    experienceCategory: EXPERIENCE_RATING.getCategory(us.experienceLevel),
+    isPrimarySport: us.isPrimarySport,
+  }));
+
+  return profileObj;
 };
 
 /**
  * Updates basic permitted profile fields and recalculates onboarding status
  */
 export const updateProfile = async (authUserId, updateFields) => {
-  const profile = await getMyProfile(authUserId);
+  const profile = await UserProfile.findOne({ authUser: authUserId });
+  if (!profile) {
+    const err = new Error("Player profile not found");
+    err.statusCode = 404;
+    throw err;
+  }
 
   if (updateFields.displayName !== undefined) profile.displayName = updateFields.displayName;
   if (updateFields.bio !== undefined) profile.bio = updateFields.bio;
@@ -90,42 +112,8 @@ export const updateProfile = async (authUserId, updateFields) => {
   if (updateFields.preferredLanguage !== undefined) profile.preferredLanguage = updateFields.preferredLanguage;
 
   // Re-evaluate onboarding completion automatically on backend
-  profile.checkOnboardingCompletion();
+  await profile.checkOnboardingCompletion();
 
-  await profile.save();
-  return profile;
-};
-
-/**
- * Replaces or registers the player's sports profiles
- */
-export const updateSports = async (authUserId, sportsList) => {
-  const profile = await getMyProfile(authUserId);
-
-  profile.sportsProfiles = sportsList;
-  profile.checkOnboardingCompletion();
-
-  await profile.save();
-  return profile;
-};
-
-/**
- * Removes a registered sport by sport name
- */
-export const removeSport = async (authUserId, sportName) => {
-  const profile = await getMyProfile(authUserId);
-  const normalized = sportName.toLowerCase().trim();
-
-  const originalLength = profile.sportsProfiles.length;
-  profile.sportsProfiles = profile.sportsProfiles.filter((s) => s.sport !== normalized);
-
-  if (profile.sportsProfiles.length === originalLength) {
-    const err = new Error(`Sport '${sportName}' is not registered on this profile`);
-    err.statusCode = 404;
-    throw err;
-  }
-
-  profile.checkOnboardingCompletion();
   await profile.save();
   return profile;
 };
@@ -134,7 +122,12 @@ export const removeSport = async (authUserId, sportName) => {
  * Updates location and calculates Uber H3 index on the backend
  */
 export const updateLocation = async (authUserId, locationData) => {
-  const profile = await getMyProfile(authUserId);
+  const profile = await UserProfile.findOne({ authUser: authUserId });
+  if (!profile) {
+    const err = new Error("Player profile not found");
+    err.statusCode = 404;
+    throw err;
+  }
 
   if (locationData.coordinates) {
     const [lng, lat] = locationData.coordinates;
@@ -143,7 +136,6 @@ export const updateLocation = async (authUserId, locationData) => {
       coordinates: [lng, lat],
     };
 
-    // Calculate Uber H3 index securely on backend
     profile.h3Index = calculateH3Index([lng, lat]);
     profile.location.lastUpdatedAt = new Date();
   }
@@ -163,7 +155,12 @@ export const updateLocation = async (authUserId, locationData) => {
  * Updates player availability
  */
 export const updateAvailability = async (authUserId, status) => {
-  const profile = await getMyProfile(authUserId);
+  const profile = await UserProfile.findOne({ authUser: authUserId });
+  if (!profile) {
+    const err = new Error("Player profile not found");
+    err.statusCode = 404;
+    throw err;
+  }
 
   profile.availability.status = status;
   profile.availability.updatedAt = new Date();
@@ -176,7 +173,12 @@ export const updateAvailability = async (authUserId, status) => {
  * Updates discovery & notification preferences
  */
 export const updatePreferences = async (authUserId, preferencesData) => {
-  const profile = await getMyProfile(authUserId);
+  const profile = await UserProfile.findOne({ authUser: authUserId });
+  if (!profile) {
+    const err = new Error("Player profile not found");
+    err.statusCode = 404;
+    throw err;
+  }
 
   if (preferencesData.searchRadiusKm !== undefined) {
     profile.preferences.searchRadiusKm = preferencesData.searchRadiusKm;
@@ -202,7 +204,12 @@ export const updateAvatar = async (authUserId, file) => {
     throw err;
   }
 
-  const profile = await getMyProfile(authUserId);
+  const profile = await UserProfile.findOne({ authUser: authUserId });
+  if (!profile) {
+    const err = new Error("Player profile not found");
+    err.statusCode = 404;
+    throw err;
+  }
 
   try {
     const uploadResult = await cloudinary.uploader.upload(file.path, {
@@ -210,7 +217,6 @@ export const updateAvatar = async (authUserId, file) => {
       resource_type: "image",
     });
 
-    // Delete previous avatar from Cloudinary if it was a custom upload
     if (profile.avatar?.publicId) {
       try {
         await cloudinary.uploader.destroy(profile.avatar.publicId);
@@ -227,7 +233,6 @@ export const updateAvatar = async (authUserId, file) => {
     await profile.save();
     return profile;
   } finally {
-    // Always clean up local temporary upload file
     if (fs.existsSync(file.path)) {
       try {
         fs.unlinkSync(file.path);
@@ -248,9 +253,14 @@ export const registerFcmToken = async (authUserId, token) => {
     throw err;
   }
 
-  const profile = await getMyProfile(authUserId);
-  const trimmedToken = token.trim();
+  const profile = await UserProfile.findOne({ authUser: authUserId });
+  if (!profile) {
+    const err = new Error("Player profile not found");
+    err.statusCode = 404;
+    throw err;
+  }
 
+  const trimmedToken = token.trim();
   if (!profile.fcmTokens) {
     profile.fcmTokens = [];
   }
@@ -267,8 +277,8 @@ export const registerFcmToken = async (authUserId, token) => {
  * Removes an FCM device token (e.g. on logout or app uninstall)
  */
 export const removeFcmToken = async (authUserId, token) => {
-  const profile = await getMyProfile(authUserId);
-  if (profile.fcmTokens && token) {
+  const profile = await UserProfile.findOne({ authUser: authUserId });
+  if (profile && profile.fcmTokens && token) {
     profile.fcmTokens = profile.fcmTokens.filter((t) => t !== token.trim());
     await profile.save();
   }
@@ -280,10 +290,9 @@ export const removeFcmToken = async (authUserId, token) => {
  * Explicitly sanitizes and prevents leaking exact coordinates, email, DOB, or auth tokens.
  */
 export const getPublicProfile = async (targetUserId) => {
-  // Query primarily by authUser ID, or by profile _id as fallback
   let profile = await UserProfile.findOne({
     $or: [{ authUser: targetUserId }, { _id: targetUserId }],
-  }).populate("authUser", "username");
+  }).populate("authUser", "username playerCode");
 
   if (!profile) {
     const err = new Error("Player profile not found");
@@ -291,18 +300,32 @@ export const getPublicProfile = async (targetUserId) => {
     throw err;
   }
 
-  // Construct safe public view
+  const targetAuthId = profile.authUser?._id || profile.authUser;
+
+  // Retrieve registered sports from UserSport collection
+  const userSports = await UserSport.find({ authUser: targetAuthId })
+    .populate("sport", "name slug hasPositions positions")
+    .sort({ isPrimarySport: -1, createdAt: 1 });
+
   return {
     id: profile._id,
-    userId: profile.authUser?._id || profile.authUser,
+    userId: targetAuthId,
     username: profile.authUser?.username || null,
+    playerCode: profile.authUser?.playerCode || null,
     displayName: profile.displayName,
     avatar: {
       url: profile.avatar?.url || "default-avatar",
     },
     bio: profile.bio || "",
     preferredLanguage: profile.preferredLanguage || "en",
-    sportsProfiles: profile.sportsProfiles || [],
+    sports: userSports.map((us) => ({
+      sport: us.sport?.name,
+      slug: us.sport?.slug,
+      preferredPositions: us.preferredPositions,
+      experienceLevel: us.experienceLevel,
+      experienceCategory: EXPERIENCE_RATING.getCategory(us.experienceLevel),
+      isPrimarySport: us.isPrimarySport,
+    })),
     availability: {
       status: profile.availability?.status || "offline",
     },
@@ -310,9 +333,53 @@ export const getPublicProfile = async (targetUserId) => {
       city: profile.location?.city || "",
       state: profile.location?.state || "",
       country: profile.location?.country || "",
-      // Notice: EXACT GPS coordinates & h3Index are NEVER exposed publicly
+      // Exact GPS coordinates & h3Index are never exposed publicly
     },
     onboardingCompleted: profile.onboardingCompleted,
     createdAt: profile.createdAt,
+  };
+};
+
+/**
+ * Retrieves sport-specific statistics and registered positions for a player.
+ * Does not fabricate unverified match stats.
+ *
+ * @param {string} targetUserId
+ * @param {string} sportSlug
+ */
+export const getPlayerSportStats = async (targetUserId, sportSlug) => {
+  const { Sport } = await import("../../sports/models/sport.model.js");
+  const sport = await Sport.findOne({ slug: sportSlug.toLowerCase().trim(), isActive: true });
+  if (!sport) {
+    const err = new Error(`Sport '${sportSlug}' not found in catalogue`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const userSport = await UserSport.findOne({
+    authUser: targetUserId,
+    sport: sport._id,
+  }).populate("sport", "name slug hasPositions positions");
+
+  if (!userSport) {
+    const err = new Error(`Player is not registered for sport '${sport.name}'`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  return {
+    userId: targetUserId,
+    sport: sport.name,
+    slug: sport.slug,
+    experienceLevel: userSport.experienceLevel,
+    experienceCategory: EXPERIENCE_RATING.getCategory(userSport.experienceLevel),
+    preferredPositions: userSport.preferredPositions,
+    isPrimarySport: userSport.isPrimarySport,
+    stats: {
+      matchesPlayed: 0,
+      verifiedRating: null,
+      ratingCount: 0,
+      note: "Verified match statistics and star ratings will update as confirmed matches are played.",
+    },
   };
 };

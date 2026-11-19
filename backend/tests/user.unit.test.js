@@ -1,78 +1,128 @@
 import {
-  validateSportsInput,
   validateLocationInput,
   validateProfileUpdate,
   validateAvailabilityInput,
   validatePreferencesInput,
 } from "../modules/user/validations/user.validation.js";
+import {
+  validateExperienceLevel,
+  validatePositionsForSport,
+  validateUserSportInput,
+} from "../modules/userSports/validations/userSport.validation.js";
 import { calculateH3Index, isValidH3Index } from "../utils/h3.utils.js";
 import { UserProfile } from "../modules/user/models/userProfile.model.js";
+import { SPORTS_CONFIG } from "../config/sports.config.js";
 
-describe("User Module - Validations & Business Logic", () => {
-  describe("Sports Profile Validation (Multi-Sport & Constraints)", () => {
-    test("should accept valid multiple sports registrations with distinct positions and skills", () => {
-      const sportsPayload = [
-        {
-          sport: "football",
-          experienceLevel: "intermediate",
-          preferredPositions: ["Goalkeeper", "Defender"],
-          skills: ["Reflexes", "Long kick"],
-          yearsOfExperience: 4,
-          isPrimarySport: true,
-        },
-        {
-          sport: "cricket",
-          experienceLevel: "advanced",
-          preferredPositions: ["Opening Batsman", "Wicketkeeper"],
-          skills: ["Cover drive", "Fast stumping"],
-          yearsOfExperience: 7,
-          isPrimarySport: false,
-        },
-      ];
+describe("User & Sports Module - Unit Tests", () => {
+  const cricketDoc = SPORTS_CONFIG.find((s) => s.slug === "cricket");
+  const footballDoc = SPORTS_CONFIG.find((s) => s.slug === "football");
+  const badmintonDoc = SPORTS_CONFIG.find((s) => s.slug === "badminton");
 
-      const { isValid, errors, validatedList } = validateSportsInput(sportsPayload);
-      expect(isValid).toBe(true);
-      expect(errors).toHaveLength(0);
-      expect(validatedList).toHaveLength(2);
-      expect(validatedList[0].sport).toBe("football");
-      expect(validatedList[0].isPrimarySport).toBe(true);
-      expect(validatedList[1].sport).toBe("cricket");
-      expect(validatedList[1].isPrimarySport).toBe(false);
+  describe("Experience Level Validation (1-10 Integer)", () => {
+    test("should accept valid integer experience levels from 1 to 10", () => {
+      [1, 2, 5, 8, 10].forEach((lvl) => {
+        const res = validateExperienceLevel(lvl);
+        expect(res.isValid).toBe(true);
+        expect(res.value).toBe(lvl);
+      });
     });
 
-    test("should reject duplicate sport registrations for the same player", () => {
-      const duplicateSports = [
-        { sport: "football", experienceLevel: "beginner" },
-        { sport: "football", experienceLevel: "intermediate" },
-      ];
-
-      const { isValid, errors } = validateSportsInput(duplicateSports);
-      expect(isValid).toBe(false);
-      expect(errors.some((e) => e.includes("Duplicate sport"))).toBe(true);
+    test("should reject 0, 11, negative numbers, and out-of-range integers", () => {
+      [0, 11, -1, 100].forEach((lvl) => {
+        const res = validateExperienceLevel(lvl);
+        expect(res.isValid).toBe(false);
+        expect(res.error).toMatch(/between 1 and 10/);
+      });
     });
 
-    test("should reject having more than one primary sport", () => {
-      const multiplePrimary = [
-        { sport: "football", experienceLevel: "beginner", isPrimarySport: true },
-        { sport: "cricket", experienceLevel: "beginner", isPrimarySport: true },
-      ];
-
-      const { isValid, errors } = validateSportsInput(multiplePrimary);
-      expect(isValid).toBe(false);
-      expect(errors.some((e) => e.includes("At most one sport can be designated as primary"))).toBe(true);
+    test("should reject non-integers and floating-point numbers", () => {
+      [5.5, 1.2, 9.99].forEach((lvl) => {
+        const res = validateExperienceLevel(lvl);
+        expect(res.isValid).toBe(false);
+        expect(res.error).toMatch(/must be an integer/);
+      });
     });
 
-    test("should reject unsupported sports", () => {
-      const unsupported = [{ sport: "underwater_hockey", experienceLevel: "beginner" }];
-      const { isValid, errors } = validateSportsInput(unsupported);
-      expect(isValid).toBe(false);
-      expect(errors.some((e) => e.includes("not currently supported"))).toBe(true);
+    test("should reject string, null, and undefined values", () => {
+      ["5", "beginner", null, undefined, {}].forEach((val) => {
+        const res = validateExperienceLevel(val);
+        expect(res.isValid).toBe(false);
+      });
+    });
+  });
+
+  describe("Sport Positions Validation", () => {
+    test("should accept valid positions for sports that have positions", () => {
+      const res = validatePositionsForSport(["batsman", "wicketkeeper"], cricketDoc);
+      expect(res.isValid).toBe(true);
+      expect(res.sanitizedPositions).toEqual(["batsman", "wicketkeeper"]);
+    });
+
+    test("should reject invalid positions for sports with positions", () => {
+      const res = validatePositionsForSport(["quarterback", "batsman"], cricketDoc);
+      expect(res.isValid).toBe(false);
+      expect(res.errors.some((e) => e.includes("not a valid position"))).toBe(true);
+    });
+
+    test("should reject non-empty positions array for sports without positions", () => {
+      const res = validatePositionsForSport(["striker"], badmintonDoc);
+      expect(res.isValid).toBe(false);
+      expect(res.errors.some((e) => e.includes("does not support positions"))).toBe(true);
+    });
+
+    test("should accept empty or omitted positions for sports without positions", () => {
+      const res1 = validatePositionsForSport([], badmintonDoc);
+      expect(res1.isValid).toBe(true);
+      expect(res1.sanitizedPositions).toEqual([]);
+
+      const res2 = validatePositionsForSport(undefined, badmintonDoc);
+      expect(res2.isValid).toBe(true);
+      expect(res2.sanitizedPositions).toEqual([]);
+    });
+
+    test("should accept 'not_sure' when selected alone", () => {
+      const res = validatePositionsForSport(["not_sure"], footballDoc);
+      expect(res.isValid).toBe(true);
+      expect(res.sanitizedPositions).toEqual(["not_sure"]);
+    });
+
+    test("should reject 'not_sure' when combined with other specific positions", () => {
+      const res = validatePositionsForSport(["goalkeeper", "not_sure"], footballDoc);
+      expect(res.isValid).toBe(false);
+      expect(res.errors.some((e) => e.includes("cannot be selected alongside"))).toBe(true);
+    });
+  });
+
+  describe("Full UserSport Input Validation", () => {
+    test("should validate and sanitize valid sport registration payload", () => {
+      const payload = {
+        sportSlug: "football",
+        experienceLevel: 7,
+        preferredPositions: ["midfielder", "forward"],
+        isPrimarySport: true,
+      };
+
+      const result = validateUserSportInput(payload, footballDoc, false);
+      expect(result.isValid).toBe(true);
+      expect(result.sanitized.experienceLevel).toBe(7);
+      expect(result.sanitized.preferredPositions).toEqual(["midfielder", "forward"]);
+      expect(result.sanitized.isPrimarySport).toBe(true);
+    });
+
+    test("should reject payload with missing or invalid fields", () => {
+      const payload = {
+        experienceLevel: 15,
+        preferredPositions: "not-an-array",
+      };
+
+      const result = validateUserSportInput(payload, cricketDoc, false);
+      expect(result.isValid).toBe(false);
+      expect(result.errors.length).toBeGreaterThan(0);
     });
   });
 
   describe("Location Validation & Uber H3 Calculation", () => {
     test("should calculate a valid Uber H3 index from GeoJSON coordinates [longitude, latitude]", () => {
-      // Coordinates for London: lng: -0.1276, lat: 51.5074
       const coords = [-0.1276, 51.5074];
       const h3Index = calculateH3Index(coords, 8);
 
@@ -82,8 +132,8 @@ describe("User Module - Validations & Business Logic", () => {
     });
 
     test("should reject out-of-range GPS coordinates", () => {
-      const invalidLat = { coordinates: [77.209, 120] }; // Lat > 90
-      const invalidLng = { coordinates: [200, 28.6139] }; // Lng > 180
+      const invalidLat = { coordinates: [77.209, 120] };
+      const invalidLng = { coordinates: [200, 28.6139] };
 
       const resultLat = validateLocationInput(invalidLat);
       expect(resultLat.isValid).toBe(false);
@@ -96,7 +146,7 @@ describe("User Module - Validations & Business Logic", () => {
 
     test("should accept valid location fields and sanitize correctly", () => {
       const validLocation = {
-        coordinates: [77.209, 28.6139], // New Delhi [lng, lat]
+        coordinates: [77.209, 28.6139],
         city: "New Delhi",
         state: "Delhi",
         country: "India",
@@ -149,34 +199,25 @@ describe("User Module - Validations & Business Logic", () => {
   });
 
   describe("Onboarding Status Backend Calculation", () => {
-    test("onboardingCompleted should remain false if no sports profiles are registered", () => {
+    test("onboardingCompleted should remain false if no sports profiles are registered", async () => {
       const doc = new UserProfile({
         authUser: "60c72b2f9b1d8b0015b6d999",
         displayName: "New Player",
-        sportsProfiles: [],
       });
 
-      const isComplete = doc.checkOnboardingCompletion();
+      const isComplete = await doc.checkOnboardingCompletion(false);
       expect(isComplete).toBe(false);
       expect(doc.onboardingCompleted).toBe(false);
       expect(doc.onboardingCompletedAt).toBeNull();
     });
 
-    test("onboardingCompleted should become true once display name and at least one sport are registered", () => {
+    test("onboardingCompleted should become true once display name and at least one sport are registered", async () => {
       const doc = new UserProfile({
         authUser: "60c72b2f9b1d8b0015b6d999",
         displayName: "New Player",
-        sportsProfiles: [
-          {
-            sport: "cricket",
-            experienceLevel: "intermediate",
-            preferredPositions: ["All-rounder"],
-            isPrimarySport: true,
-          },
-        ],
       });
 
-      const isComplete = doc.checkOnboardingCompletion();
+      const isComplete = await doc.checkOnboardingCompletion(true);
       expect(isComplete).toBe(true);
       expect(doc.onboardingCompleted).toBe(true);
       expect(doc.onboardingCompletedAt).toBeInstanceOf(Date);

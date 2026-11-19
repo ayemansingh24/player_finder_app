@@ -190,14 +190,13 @@ const run = async () => {
     });
     console.log(`   -------------------------------------------------------\n`);
 
-    // 7. Test sending real email to ayemansingh24@gmail.com
-    console.log("6. Testing Mail Service by sending email to 'ayemansingh24@gmail.com'...");
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    // 7. Test sending real Firebase email to ayemansingh24@gmail.com
+    console.log("6. Testing Native Firebase Mail Service for 'ayemansingh24@gmail.com'...");
     try {
-      const mailResult = await mailService.sendPasswordResetEmail("ayemansingh24@gmail.com", otp);
-      console.log(`   ✅ Email dispatched to ayemansingh24@gmail.com! Method: '${mailResult.method}' (OTP: ${otp})\n`);
+      const mailResult = await mailService.sendFirebasePasswordResetEmail("ayemansingh24@gmail.com");
+      console.log(`   ✅ Official Firebase email dispatched by Google to ayemansingh24@gmail.com! Method: '${mailResult.method}'\n`);
     } catch (mailErr) {
-      console.error(`   ❌ Email dispatch error: ${mailErr.message}\n`);
+      console.error(`   ❌ Firebase Email dispatch error: ${mailErr.message}\n`);
     }
 
     console.log("=============================================================");

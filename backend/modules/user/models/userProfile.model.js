@@ -1,50 +1,5 @@
 import mongoose, { Schema } from "mongoose";
-import { SUPPORTED_SPORTS, EXPERIENCE_LEVELS, AVAILABILITY_STATUSES } from "../../../utils/constants.js";
-
-// Subdocument Schema for Sport Profiles
-const sportsProfileSubSchema = new Schema(
-  {
-    sport: {
-      type: String,
-      required: [true, "Sport identifier is required"],
-      lowercase: true,
-      trim: true,
-      enum: {
-        values: SUPPORTED_SPORTS,
-        message: "{VALUE} is not a currently supported sport",
-      },
-    },
-    experienceLevel: {
-      type: String,
-      required: [true, "Experience level is required"],
-      enum: {
-        values: EXPERIENCE_LEVELS,
-        message: "Experience level must be beginner, intermediate, or advanced",
-      },
-      default: "beginner",
-    },
-    preferredPositions: {
-      type: [String],
-      default: [],
-    },
-    // Self-declared skills - demarcated from verified captain/match ratings
-    skills: {
-      type: [String],
-      default: [],
-    },
-    yearsOfExperience: {
-      type: Number,
-      min: [0, "Years of experience cannot be negative"],
-      max: [70, "Invalid years of experience"],
-      default: 0,
-    },
-    isPrimarySport: {
-      type: Boolean,
-      default: false,
-    },
-  },
-  { _id: false }
-);
+import { AVAILABILITY_STATUSES } from "../../../utils/constants.js";
 
 const userProfileSchema = new Schema(
   {
@@ -90,31 +45,20 @@ const userProfileSchema = new Schema(
       trim: true,
     },
 
-    // 2. Sports Profiles
-    sportsProfiles: {
-      type: [sportsProfileSubSchema],
-      default: [],
-      validate: [
-        {
-          validator: function (profiles) {
-            if (!profiles || profiles.length === 0) return true;
-            const sports = profiles.map((p) => p.sport.toLowerCase());
-            return new Set(sports).size === sports.length;
-          },
-          message: "Duplicate sport registrations are not allowed.",
-        },
-        {
-          validator: function (profiles) {
-            if (!profiles || profiles.length === 0) return true;
-            const primaryCount = profiles.filter((p) => p.isPrimarySport).length;
-            return primaryCount <= 1;
-          },
-          message: "At most one sport can be designated as the primary sport.",
-        },
-      ],
+    // Gender — used as optional discovery filter
+    gender: {
+      type: String,
+      enum: ["male", "female", "other", "prefer_not_to_say"],
+      default: null,
     },
 
-    // 3. Location and H3 Geospatial Design
+    // Discovery opt-out flag — players can hide themselves from search results
+    discoveryEnabled: {
+      type: Boolean,
+      default: true,
+    },
+
+    // 2. Location and H3 Geospatial Design
     location: {
       geo: {
         type: {
@@ -154,15 +98,23 @@ const userProfileSchema = new Schema(
       },
     },
 
-    // Backend-computed Uber H3 Index (never trusted from client)
+    // Dual-resolution H3 cells — computed server-side, never from client
+    h3Cells: {
+      res7: { type: String, index: true, default: null },
+      res8: { type: String, index: true, default: null },
+    },
+
+    // Legacy single-resolution index retained for backward compatibility during migration
     h3Index: {
       type: String,
       index: true,
+      sparse: true,
       default: null,
     },
 
-    // 4. Availability
+    // 3. Availability Architecture (Section 61)
     availability: {
+      // Effective materialized status
       status: {
         type: String,
         enum: {
@@ -171,13 +123,60 @@ const userProfileSchema = new Schema(
         },
         default: "offline",
       },
+      // Base preferred mode when no overrides or active schedules apply
+      baseStatus: {
+        type: String,
+        enum: AVAILABILITY_STATUSES,
+        default: "available",
+      },
+      // Manual indefinite inactivity override (Priority 1)
+      manualIndefiniteInactive: {
+        type: Boolean,
+        default: false,
+      },
+      // Temporary pause expiration (Priority 2)
+      temporaryPauseUntil: {
+        type: Date,
+        default: null,
+      },
+      // One-time schedules (Priority 3)
+      oneTimeSchedules: [
+        {
+          startAt: { type: Date, required: true },
+          endAt: { type: Date, required: true },
+          status: { type: String, enum: AVAILABILITY_STATUSES, default: "available" },
+          note: { type: String, default: "" },
+        },
+      ],
+      // Recurring weekly schedules (Priority 4)
+      recurringSchedules: [
+        {
+          daysOfWeek: [{ type: Number, min: 0, max: 6 }], // 0=Sun, 6=Sat
+          startTime: { type: String, match: [/^\d{2}:\d{2}$/, "HH:MM format"] },
+          endTime: { type: String, match: [/^\d{2}:\d{2}$/, "HH:MM format"] },
+          status: { type: String, enum: AVAILABILITY_STATUSES, default: "available" },
+        },
+      ],
+      // IANA timezone identifier
+      timezone: {
+        type: String,
+        default: "UTC",
+      },
+      nextTransition: {
+        type: Date,
+        default: null,
+      },
+      scheduleVersion: {
+        type: Number,
+        default: 0,
+      },
       updatedAt: {
         type: Date,
         default: Date.now,
       },
     },
 
-    // 5. Player Preferences
+    // 4. Player Preferences
     preferences: {
       searchRadiusKm: {
         type: Number,
@@ -195,13 +194,13 @@ const userProfileSchema = new Schema(
       },
     },
 
-    // 6. Push Notification Device Tokens (Firebase Cloud Messaging)
+    // 5. Push Notification Device Tokens (Firebase Cloud Messaging)
     fcmTokens: {
       type: [String],
       default: [],
     },
 
-    // 7. Onboarding Lifecycle (Computed on backend, protected from direct modification)
+    // 6. Onboarding Lifecycle (Computed on backend, protected from direct modification)
     onboardingCompleted: {
       type: Boolean,
       default: false,
@@ -219,24 +218,47 @@ const userProfileSchema = new Schema(
   }
 );
 
+// ─── Indexes ───────────────────────────────────────────────────────────────────
+
 // MongoDB 2dsphere index on location.geo for geospatial queries
 userProfileSchema.index({ "location.geo": "2dsphere" });
 
-// Compound index for discovering nearby available players who consented to share location
+// Legacy compound index (kept for backward compatibility during migration)
 userProfileSchema.index({
   "location.isSharingEnabled": 1,
   "availability.status": 1,
   h3Index: 1,
 });
 
+// Discovery indexes using dual-resolution H3 cells
+userProfileSchema.index({ "h3Cells.res7": 1, "availability.status": 1, "location.isSharingEnabled": 1 });
+userProfileSchema.index({ "h3Cells.res8": 1, "availability.status": 1, "location.isSharingEnabled": 1 });
+userProfileSchema.index({ onboardingCompleted: 1, "availability.status": 1 });
+
+// ─── Methods ───────────────────────────────────────────────────────────────────
+
 /**
  * Evaluates whether onboarding requirements are fully satisfied:
  * - displayName is provided
- * - At least one registered sport in sportsProfiles
+ * - At least one registered sport in UserSport collection
+ *
+ * @param {boolean} [hasRegisteredSports] Optional pre-computed check
  */
-userProfileSchema.methods.checkOnboardingCompletion = function () {
+userProfileSchema.methods.checkOnboardingCompletion = async function (hasRegisteredSports) {
   const hasDisplayName = !!(this.displayName && this.displayName.trim().length > 0);
-  const hasSports = Array.isArray(this.sportsProfiles) && this.sportsProfiles.length > 0;
+
+  let hasSports = false;
+  if (typeof hasRegisteredSports === "boolean") {
+    hasSports = hasRegisteredSports;
+  } else {
+    try {
+      const UserSportModel = mongoose.models.UserSport || mongoose.model("UserSport");
+      const count = await UserSportModel.countDocuments({ authUser: this.authUser });
+      hasSports = count > 0;
+    } catch {
+      hasSports = false;
+    }
+  }
 
   if (hasDisplayName && hasSports) {
     if (!this.onboardingCompleted) {

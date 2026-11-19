@@ -1,6 +1,8 @@
 import { User } from "../models/user.model.js";
 import { createInitialProfile } from "../../user/services/user.service.js";
 import { COOKIE_CONFIG } from "../../../utils/constants.js";
+import { allocatePlayerCode } from "../../../utils/playerCodeGenerator.js";
+import { PlayerCodeRegistry } from "../../../models/PlayerCodeRegistry.model.js";
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -59,19 +61,22 @@ const registerUser = async (req, res) => {
       });
     }
 
-    const existingUser = await User.findOne({
-      $or: [{ username }, { email }],
-    });
-
-    if (existingUser) {
+    // 1. Check for existing email (must be globally unique)
+    const existingByEmail = await User.findOne({ email: email.toLowerCase().trim() });
+    if (existingByEmail) {
       return res.status(409).json({
         success: false,
-        message: "User with this email or username already exists",
+        message: "An account with this email already exists",
       });
     }
 
+    // 2. Allocate a unique permanent Player Code
+    const playerCode = await allocatePlayerCode(User, PlayerCodeRegistry);
+
+    // 3. Create user document with assigned Player Code
     const user = await User.create({
       username: username.toLowerCase().trim(),
+      playerCode,
       email: email.toLowerCase().trim(),
       fullName: fullName.trim(),
       password,
@@ -81,12 +86,11 @@ const registerUser = async (req, res) => {
       },
     });
 
-    // Idempotent creation of the associated UserProfile
+    // 4. Idempotent creation of the associated UserProfile (non-fatal)
     try {
       await createInitialProfile(user);
     } catch (profileErr) {
       console.error("Warning: Profile initialization error:", profileErr.message);
-      // Non-fatal because user.service has self-healing getMyProfile fallback
     }
 
     const { accessToken, refreshToken } = await generateAccessAndRefreshTokens(user._id);
@@ -105,6 +109,7 @@ const registerUser = async (req, res) => {
       success: true,
       message: "User registered successfully",
       user: createdUser,
+      playerCode: createdUser.playerCode,
       accessToken,
       // Only expose refreshToken in JSON body to Mobile clients (for Expo SecureStore)
       ...(isMobile ? { refreshToken } : {}),
@@ -120,17 +125,26 @@ const registerUser = async (req, res) => {
 
 const loginUser = async (req, res) => {
   try {
-    const { email, username, password } = req.body;
+    const { email, identifier, password } = req.body;
+    const loginIdentifier = (email || identifier || "").toLowerCase().trim();
 
-    if ((!email && !username) || !password) {
+    if (!loginIdentifier || !password) {
       return res.status(400).json({
         success: false,
-        message: "Email/username and password are required",
+        message: "Email (or Player Code) and password are required",
       });
     }
 
-    const query = email ? { email: email.toLowerCase().trim() } : { username: username.toLowerCase().trim() };
-    const user = await User.findOne(query);
+    // Support unambiguous identity: email or numeric playerCode.
+    // Usernames are no longer unique and must never authenticate as the wrong account.
+    let user;
+    if (loginIdentifier.includes("@")) {
+      user = await User.findOne({ email: loginIdentifier });
+    } else if (/^[1-9][0-9]{6,9}$/.test(loginIdentifier)) {
+      user = await User.findOne({ playerCode: loginIdentifier });
+    } else {
+      user = await User.findOne({ email: loginIdentifier });
+    }
 
     if (!user) {
       return res.status(404).json({

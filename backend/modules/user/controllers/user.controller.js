@@ -8,6 +8,7 @@ import {
 } from "../validations/user.validation.js";
 import { successResponse, errorResponse } from "../../../utils/apiResponse.js";
 import { HTTP_STATUS } from "../../../utils/constants.js";
+import { User } from "../../auth/models/user.model.js";
 
 /**
  * GET /api/v1/users/me
@@ -196,6 +197,73 @@ export const getPublicProfile = async (req, res, next) => {
 
     const publicProfile = await userService.getPublicProfile(userId);
     return successResponse(res, "Public profile retrieved successfully", publicProfile, HTTP_STATUS.OK);
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * GET /api/v1/users/search?playerCode=XXXXXXX
+ * Finds a player by exact playerCode. Authenticated & rate-limited.
+ */
+export const searchByPlayerCode = async (req, res, next) => {
+  try {
+    const { playerCode } = req.query;
+
+    if (!playerCode || typeof playerCode !== "string" || !playerCode.trim()) {
+      return errorResponse(res, "playerCode query parameter is required", HTTP_STATUS.BAD_REQUEST);
+    }
+
+    // Normalize optional leading '#'
+    const trimmedCode = playerCode.trim().replace(/^#/, "");
+
+    // Validate format: 7–10 digits, no leading zero
+    if (!/^[1-9][0-9]{6,9}$/.test(trimmedCode)) {
+      return errorResponse(
+        res,
+        "Invalid playerCode format. Must be 7–10 digits with no leading zero.",
+        HTTP_STATUS.BAD_REQUEST
+      );
+    }
+
+    // Find user by exact playerCode match — never expose sensitive fields
+    const user = await User.findOne({ playerCode: trimmedCode }).select(
+      "username fullName playerCode avatar"
+    );
+
+    if (!user) {
+      return errorResponse(res, "No player found with that player code", HTTP_STATUS.NOT_FOUND);
+    }
+
+    const publicData = {
+      userId: user._id,
+      username: user.username || null,
+      displayName: user.fullName || null,
+      playerCode: user.playerCode,
+      avatar: {
+        url: user.avatar?.url || "default-avatar",
+      },
+    };
+
+    return successResponse(res, "Player found", publicData, HTTP_STATUS.OK);
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * GET /api/v1/users/:userId/sports/:sportSlug/stats
+ * Retrieves registered sport positions and stats for a player
+ */
+export const getPlayerSportStats = async (req, res, next) => {
+  try {
+    const { userId, sportSlug } = req.params;
+    if (!userId || !sportSlug) {
+      return errorResponse(res, "userId and sportSlug are required", HTTP_STATUS.BAD_REQUEST);
+    }
+
+    const stats = await userService.getPlayerSportStats(userId, sportSlug);
+    return successResponse(res, "Sport stats retrieved successfully", stats, HTTP_STATUS.OK);
   } catch (error) {
     next(error);
   }

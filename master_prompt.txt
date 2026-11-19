@@ -1,0 +1,784 @@
+<USER_REQUEST>
+# PART K — MANDATORY H3 EDGE CASES, QUERY OPTIMIZATION AND LOCATION SECURITY
+
+## IMPORTANT INSTRUCTIONS
+
+Before finalizing the Discovery, Team, Invitation, Match and Availability modules, review and implement the following edge-case protections.
+
+These are mandatory engineering requirements, not optional future suggestions.
+
+The application uses:
+
+- Node.js, Express.js and plain JavaScript ES Modules
+- MongoDB and Mongoose
+- `h3-js`
+- MongoDB GeoJSON and `2dsphere` indexes
+- Redis and BullMQ
+
+**Do not introduce Firestore.**
+
+Some constraints below originate from Firestore-based H3 implementations. Translate their underlying engineering concerns into MongoDB-specific implementations without copying Firestore limitations directly.
+
+Do not remove existing H3 integration.
+
+Do not create or run tests yet.
+
+Implement the relevant safeguards in code, document them, and clearly identify any assumptions requiring performance verification later.
+
+---
+
+## EDGE CASE 1 — EMPTY H3 HEXAGON AND SEARCH EXPANSION
+
+### Problem
+
+A player may be located in an H3 cell containing no eligible players.
+
+Example:
+
+A captain searches for football midfielders near their preferred playing location.
+
+The captain's immediate H3 cell contains no midfielders.
+
+However, nearby hexagons contain several eligible players.
+
+The search must not incorrectly return an empty result simply because the starting hexagon is empty.
+
+### Required Implementation
+
+Separate two concepts:
+
+1. **H3 geographical coverage**
+2. **User-requested search radius expansion**
+
+### A. Correct coverage inside the selected radius
+
+Suppose the captain selects a 5 km radius.
+
+The H3 utility must identify all cells required to cover that entire radius, not just the centre hexagon.
+
+The Discovery Service must then use MongoDB to enforce the actual distance limit.
+
+If the centre cell is empty but nearby cells inside the 5 km radius contain players, those players must still appear.
+
+For fixed-radius searches, prefer calculating a complete conservative H3 covering set and executing a properly indexed geospatial query.
+
+Do not execute one database request per neighbouring hexagon unless there is a demonstrated reason.
+
+### B. Expanding beyond the original radius
+
+If no eligible players exist within the full selected radius, offer:
+
+"No eligible players found within 5 km. Expand search?"
+
+Possible options:
+
+- Search within 10 km
+- Search within 15 km
+- Search within 20 km
+
+Use configured radius limits.
+
+Do not silently expand beyond the captain's chosen distance filter.
+
+Allow an explicit `autoExpandRadius` option if the product requires automatic expansion later.
+
+Example request:
+
+```json
+{
+  "sport": "football",
+  "position": "midfielder",
+  "filters": {
+    "maxDistanceKm": 5
+  },
+  "autoExpandRadius": false
+}
+```
+
+When auto-expansion is enabled, return the final search radius actually used.
+
+### C. Ring expansion logic
+
+If progressive H3 ring traversal is implemented:
+
+- Begin with the centre cell.
+- Expand outward using supported H3 traversal APIs.
+- Track visited H3 cells with a Set.
+- Avoid repeatedly querying the entire cumulative `gridDisk`.
+- Account for H3 pentagons and grid distortion.
+- Never interpret ring count as an exact kilometre radius.
+- Apply precise MongoDB distance filtering.
+- Stop at the maximum approved distance.
+
+Important boundary correctness rule:
+
+**Querying only newly added H3 cells is not sufficient when expanding an exact-radius search.**
+
+A previously checked hexagon can overlap both the old radius and the newly expanded area.
+
+If its earlier query was restricted by the old radius, additional eligible players may still exist in that same hexagon beyond that boundary.
+
+Therefore, use distance annuli, such as MongoDB `$geoNear` with appropriate minimum and maximum distances, while including all cells necessary to cover the new annulus.
+
+Do not miss valid players to avoid a repeated cell query.
+
+### Expected Outcome
+
+- Empty centre hexagon does not cause false empty results.
+- Search respects the specified radius.
+- Expansion requires user permission.
+- No duplicate players.
+- No missing valid candidates at cell boundaries.
+- Safe fallback to indexed MongoDB geospatial search when H3 traversal cannot guarantee completeness.
+
+---
+
+## EDGE CASE 2 — DUPLICATE DATABASE READS DURING EXPANSION
+
+### Problem
+
+Naively expanding searches using:
+
+`gridDisk(center, 0)`
+
+then:
+
+`gridDisk(center, 1)`
+
+then:
+
+`gridDisk(center, 2)`
+
+can repeatedly include previously searched cells.
+
+This generates unnecessary database work.
+
+Firestore charges per document read in relevant configurations, while MongoDB has different query and resource costs.
+
+Our concern is avoiding unnecessary MongoDB operations and database scanning.
+
+### Required Implementation
+
+For fixed-radius searches, prefer one complete covering calculation and one appropriate aggregation query.
+
+For explicitly progressive searches:
+
+- Track visited H3 cells.
+- Track already returned player IDs.
+- Deduplicate candidate IDs.
+- Use distance annuli to avoid repeatedly retrieving previously returned distance ranges.
+- Preserve complete coverage of each new geographical area.
+- Maintain deterministic result ordering.
+- Avoid a separate MongoDB query for every cell.
+
+Do not treat a JavaScript Set as proof that database reads cannot repeat internally.
+
+The objective is to minimize unnecessary requests and examined documents without sacrificing correctness.
+
+Use a bounded query budget.
+
+### MongoDB Requirements
+
+- Index the GeoJSON location with `2dsphere`.
+- Index H3 fields actually used by queries.
+- Restrict search radius.
+- Project only necessary public fields.
+- Avoid unnecessary repeated aggregation executions.
+- Avoid unbounded in-memory aggregation.
+
+Do not claim that MongoDB can always simultaneously use an independent H3 index and `2dsphere` index efficiently in one `$geoNear` query.
+
+Inspect query-planner behavior during the later performance-testing phase.
+
+### Expected Outcome
+
+Efficient queries with no duplicate results and no unnecessary per-cell database round trips.
+
+---
+
+## EDGE CASE 3 — LARGE H3 CELL ARRAYS AND DATABASE QUERY LIMITS
+
+### Problem
+
+A large search radius may produce many H3 candidate cells.
+
+For example, an ordinary hexagonal grid disk of radius `k = 3` contains up to 37 cells.
+
+Firestore has limits on disjunctive queries, but those limits must not be incorrectly copied into MongoDB.
+
+MongoDB does not use Firestore's fixed 30-item `in` restriction.
+
+However, large `$in` arrays can still create expensive queries.
+
+### Required Implementation
+
+Implement configurable limits such as:
+
+```javascript
+export const H3_QUERY_CONFIG = {
+  maxCandidateCells: 800,
+  maxRadiusKm: 20,
+  maxSearchPageSize: 20,
+  enableGeoFallback: true
+};
+```
+
+These values are initial configuration suggestions, not measured production limits.
+
+Before executing a search:
+
+1. Calculate candidate H3 cells.
+2. Deduplicate them.
+3. Check the candidate-cell count.
+4. Confirm resolution and radius are valid.
+5. Determine whether H3 filtering is beneficial.
+6. Execute an indexed query or switch to geospatial fallback.
+
+When the number of candidate cells exceeds the configured threshold:
+
+**Prefer falling back to MongoDB `$geoNear` using the `2dsphere` index.**
+
+Do not silently truncate the list of hexagons.
+
+Do not crash because a generated `$in` array is too large.
+
+Do not issue dozens of independent queries and concatenate results without guaranteeing global ordering and correct pagination.
+
+If batching is ever necessary:
+
+- Make batch size configurable.
+- Deduplicate records.
+- Preserve correct global sorting.
+- Handle partial failures.
+- Enforce bounded concurrency.
+- Ensure all eligible records remain discoverable.
+
+Do not introduce Firestore query batching or Firestore index definitions.
+
+### Expected Outcome
+
+Large-radius searches remain bounded, correct and resilient.
+
+---
+
+## EDGE CASE 4 — POPULATION DENSITY IMBALANCE
+
+### Problem
+
+The number of users in an H3 cell is not constant.
+
+Example:
+
+**Dense metropolitan area**
+
+A small geographical area might contain thousands of registered players.
+
+**Small town**
+
+A much larger area might contain only a handful of players.
+
+Using the same H3 strategy everywhere may create inefficient candidate searches.
+
+### Required Implementation
+
+Keep the proposed resolution configuration:
+
+- Resolution 8 for smaller-radius searches.
+- Resolution 7 for medium/larger-radius searches.
+
+But make the resolution-selection logic configurable and extendable.
+
+Do not hardcode the assumption that resolution 7 is always optimal for every radius or population density.
+
+### Density-Aware Improvements
+
+Design the H3 utility and Discovery Service to support:
+
+- Candidate-count estimation
+- Cell-density metrics
+- Search-radius adaptation when requested
+- Configurable resolution selection
+- Geospatial fallback when H3 adds no benefit
+
+Initially, implement a simple deterministic resolution strategy.
+
+Do not introduce a complicated predictive-density system unnecessarily.
+
+### Dense Area Handling
+
+When many users occupy the candidate cells:
+
+- Apply sport and availability restrictions efficiently.
+- Use indexed joins where possible.
+- Restrict selected fields.
+- Apply actual distance constraints.
+- Enforce pagination.
+- Avoid retrieving all candidates into Node.js.
+- Monitor query execution cost.
+
+Do not assume switching to a finer H3 resolution automatically fixes every dense-area query.
+
+### Sparse Area Handling
+
+When few or no users are nearby:
+
+- Search all eligible cells inside the approved radius.
+- Return a valid empty result if nobody qualifies.
+- Offer radius expansion.
+- Do not secretly broaden the search beyond the user's filter.
+- Do not mark players available merely because the area is sparsely populated.
+
+### Redis Usage
+
+Redis may store short-lived, non-sensitive aggregated statistics such as:
+
+- Approximate user count per H3 cell
+- Approximate eligible player density
+- Query configuration
+- Cell-cover computations
+
+Avoid exposing individual user identities or location histories through density metrics.
+
+Density statistics must not override authoritative availability checks.
+
+Document cache invalidation and privacy considerations.
+
+### Expected Outcome
+
+The architecture performs reasonably in both dense and sparse locations without duplicating the entire search implementation.
+
+---
+
+## EDGE CASE 5 — COMPOSITE INDEXES AND OPTIONAL FILTER PERFORMANCE
+
+### Problem
+
+Discovery searches may combine:
+
+- H3 cell conditions
+- Sport
+- Position
+- Experience
+- Gender
+- Age
+- Availability
+- Distance
+- Rating
+- Sorting
+
+Firestore requires particular composite indexes for supported filter/order combinations.
+
+Our application instead uses MongoDB and must implement appropriate MongoDB indexing strategies.
+
+### Required Implementation
+
+Review the actual aggregation pipeline and identify fields used by the most important query patterns.
+
+Create appropriate indexes across the existing models.
+
+### UserProfile
+
+Review indexing for:
+
+- `location.geo` using `2dsphere`
+- `h3Cells.res7`
+- `h3Cells.res8`
+- Effective availability
+- Discovery visibility
+- Selected profile filter fields where useful
+
+### UserSport
+
+Review compound indexes involving:
+
+- `authUser`
+- `sport`
+- `preferredPositions`
+- `experienceLevel`
+
+Preserve the unique user-and-sport index.
+
+### Team
+
+Review indexing for:
+
+- Team preferred location using `2dsphere`
+- Team H3 resolution fields
+- Sport
+- Challenge visibility
+- Team status
+
+### Invitation
+
+Review indexing for:
+
+- Recipient
+- Sender
+- Type
+- Status
+- Expiration
+- Duplicate prevention
+
+### Match
+
+Review indexing for:
+
+- Participating teams
+- Match status
+- Scheduled date
+- Match participants
+
+### Important Query Planner Rule
+
+Do not blindly create a separate composite index for every possible filter combination.
+
+This would increase index storage and write overhead.
+
+Use selective indexes based on actual query patterns.
+
+Preserve MongoDB `$geoNear` as the first aggregation stage.
+
+Use `key` to specify the correct geospatial field.
+
+A combined H3 `$in` condition inside `$geoNear.query` does not automatically guarantee efficient use of both H3 and geospatial indexes.
+
+During a later performance-testing phase, use MongoDB `explain("executionStats")` or equivalent supported inspection to evaluate:
+
+- Index usage
+- Documents examined
+- Keys examined
+- Execution time
+- Whether H3 candidate filtering improves the query
+
+For this implementation phase, write the indexes and document the intended query plans, but **do not execute tests or benchmarking yet**.
+
+### Expected Outcome
+
+Correct MongoDB indexes, bounded query workloads and no unnecessary Firestore-specific logic.
+
+---
+
+## EDGE CASE 6 — LOCATION PRIVACY, SPOOFING AND INPUT VALIDATION
+
+### Problem
+
+Users may:
+
+- Send invalid latitude/longitude values.
+- Supply fake GPS coordinates.
+- Use manually typed locations far from where they actually live.
+- Attempt to identify another user's home through repeated searches.
+- Exploit precise distance information to estimate a player's exact location.
+
+The application must account for these scenarios.
+
+### A. Location Input Validation
+
+Validate all incoming coordinates:
+
+- Latitude must be between -90 and 90.
+- Longitude must be between -180 and 180.
+- Both values must be finite numeric values.
+- Reject NaN, Infinity, null and invalid coordinate structures.
+- Enforce GeoJSON Point structure.
+- Reject unexpected MongoDB operators.
+- Normalize and validate geocoding results.
+
+Remember:
+
+`h3-js`: latitude, longitude.
+
+GeoJSON: longitude, latitude.
+
+H3 cell IDs must always be computed on the backend.
+
+Never trust frontend-supplied H3 cells.
+
+### B. Preferred Location vs Live GPS
+
+Our onboarding asks users:
+
+"Where do you usually stay or prefer to play?"
+
+Options:
+
+- Use Current Location
+- Enter Location Manually
+
+This is a preferred playing location, not continuous live tracking.
+
+A user may legitimately choose a playing area different from their home.
+
+Do not automatically classify every manually selected location as spoofing.
+
+Do not require continuous GPS access.
+
+Provide the ability to update or remove the preferred location and disable sharing.
+
+### C. Privacy
+
+Never expose the following in public discovery API responses:
+
+- Raw private latitude
+- Raw private longitude
+- Exact home address
+- Complete location history
+- Private geocoding details
+- H3 cell identifiers that reveal private location at fine resolution
+
+Return safe information such as:
+
+- Public locality or city
+- Coarse distance band
+- Sport
+- Position
+- Public availability
+- Verified public sport statistics
+
+Avoid exposing extremely precise distances.
+
+Avoid allowing repeated arbitrary searches to reveal a player's exact location through triangulation.
+
+Apply rate limiting and abuse detection to repeated changing-centre searches.
+
+Do not let unauthenticated users scrape discoverable player profiles.
+
+Respect discovery opt-out and blocking rules.
+
+### D. Fake GPS and Suspicious Updates
+
+Perfect GPS-spoofing prevention is not possible.
+
+Implement reasonable safeguards:
+
+- Server-side validation
+- Controlled preferred-location changes
+- Rate limits on location updates
+- Monitoring of unusually frequent large location changes
+- Optional suspicious-location flags
+- Validation of selected geocoding results
+- Explicit location-sharing consent
+
+Do not falsely represent user-selected locations as device-verified.
+
+Do not automatically ban users solely because their preferred playing location differs from their physical GPS location.
+
+Avoid collecting unnecessary location history.
+
+### E. Invitation Security
+
+Before sending a new ordinary geographical recruitment invitation:
+
+- Recheck actual account eligibility.
+- Recheck effective availability.
+- Recheck sport/position compatibility.
+- Verify recipient invitation preferences.
+- Check duplicate pending invitations.
+- Enforce sender permissions.
+- Enforce anti-spam limits.
+
+Do not trust earlier cached Discovery results as final authorization.
+
+### Expected Outcome
+
+Location-based discovery remains useful without exposing sensitive user coordinates or accepting obviously malformed inputs.
+
+---
+
+# PART L — ADDITIONAL FAILURE SCENARIOS
+
+Handle and document these situations.
+
+## 1. Missing H3 Cell
+
+Existing users may have GeoJSON coordinates but no newly calculated H3 cells.
+
+Provide a safe backfill mechanism.
+
+Do not make them disappear silently from discovery.
+
+Use a correct geographical fallback until migration is complete.
+
+## 2. H3/GeoJSON Inconsistency
+
+If a user updates their preferred location, update their GeoJSON and H3 indexes consistently.
+
+Avoid partially updated records.
+
+Consider versioned location updates or transactional safeguards when appropriate.
+
+## 3. Player Becomes Inactive During Search
+
+A player may appear in a search but become inactive before the captain clicks Invite.
+
+Invitation Service must recheck availability.
+
+If the player is now inactive, reject the ordinary invitation gracefully.
+
+## 4. Concurrent Invitations
+
+Two captains may invite the same player.
+
+That may be allowed depending on match scheduling rules.
+
+However, prevent:
+
+- Duplicate pending invitations for the same purpose
+- Double roster assignment
+- Acceptance into already filled match slots
+- Conflicting confirmed match commitments where the platform enforces exclusivity
+
+Use atomic database operations and safe state transitions.
+
+## 5. Deleted or Disabled Accounts
+
+Never return disabled or deleted users in active discovery.
+
+Handle deleted-user references in existing historical matches without corrupting match history.
+
+## 6. Search at H3 Boundaries
+
+A user near the boundary of two hexagons must not disappear.
+
+Use a covering algorithm with a clearly documented completeness guarantee or use MongoDB geospatial fallback.
+
+## 7. Pagination Stability
+
+When player availability changes between pages:
+
+- Avoid duplicate records.
+- Use stable sorting and tie-breakers.
+- Handle results that disappear between requests.
+- Document limitations of offset pagination.
+- Keep a future cursor-pagination migration path.
+
+## 8. Redis Unavailable
+
+If Redis becomes unavailable:
+
+- Permanent data must remain intact in MongoDB.
+- Search must not return unauthorized results.
+- Define safe rate-limiter failure behavior.
+- Background availability jobs must recover when infrastructure returns.
+- Do not silently claim scheduled transitions occurred.
+
+## 9. H3 Calculation Errors
+
+Catch H3-specific failures.
+
+Use a safe, correct geospatial fallback for unsupported or excessive cell-cover calculations.
+
+Do not swallow errors and return misleading empty results.
+
+## 10. Empty Results
+
+Distinguish:
+
+- No registered users in the geographical area.
+- No users matching the chosen sport/position/filters.
+- Requested radius too small.
+- External dependency error.
+- Invalid location.
+- Unsupported rating filter.
+
+Do not automatically return "No players nearby" when the database query actually failed.
+
+---
+
+# PART M — PERFORMANCE AND OBSERVABILITY
+
+Add structured logging and performance instrumentation without exposing personal location data.
+
+Track appropriate metrics:
+
+- Discovery request count
+- Search radius
+- Selected H3 resolution
+- Number of covering cells
+- H3 fallback frequency
+- MongoDB query duration
+- Candidate count
+- Final result count
+- Pagination size
+- Rate-limit rejections
+- Worker/job failures
+- Availability synchronization failures
+
+Avoid logging exact GPS coordinates, user tokens or sensitive request bodies.
+
+Make thresholds configurable.
+
+Do not log individual cell histories in a way that allows reconstruction of private player movement.
+
+Document what should be benchmarked when the separate testing phase begins.
+
+---
+
+# PART N — DOCUMENTATION UPDATE
+
+Update all five module documentation files so these constraints are included.
+
+### discovery.md
+
+Explain all six main edge cases, covering geometry, ring expansion, indexing, candidate limits, density balancing and privacy.
+
+### invitation.md
+
+Explain invitation eligibility rechecks, deduplication, anti-spam controls and location-based recruitment targeting.
+
+### team.md
+
+Explain team H3 indexing, preferred playing area changes, confirmed roster validation and eligibility.
+
+### match.md
+
+Explain why H3 is not required for scoring and result confirmation, plus concurrency and duplicate-match safeguards.
+
+### availability.md
+
+Explain authoritative availability checks, scheduled changes, worker reconciliation and protection against stale search results.
+
+---
+
+# FINAL INSTRUCTIONS
+
+These edge cases must be considered before completing the implementation.
+
+For each relevant edge case:
+
+1. Identify the failure scenario.
+2. Implement the appropriate safeguard.
+3. Document the selected strategy.
+4. Explain the fallback behavior.
+5. Identify dependencies.
+6. Note any performance assumptions requiring later verification.
+
+Do not claim complete coverage without explaining why the chosen H3 strategy is geometrically correct.
+
+Do not claim index efficiency without later query-plan evidence.
+
+Do not introduce Firestore.
+
+Do not remove H3.
+
+Do not silently truncate search areas or result sets.
+
+Do not implement or run tests yet.
+
+Prioritize correctness, privacy, maintainability and appropriate database performance over excessive optimization.
+
+Continue building the five modules with these constraints integrated into their actual services, utilities, validations and Markdown documentation.
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-11-18T11:49:46+05:30.
+
+The user's current state is as follows:
+Active Document: /Users/ayemansingh/Desktop/Projects/sport-project/backend/package.json (LANGUAGE_UNSPECIFIED)
+Cursor is on line: 1
+Other open documents:
+- /Users/ayemansingh/Desktop/Projects/sport-project/backend/package-lock.json (LANGUAGE_UNSPECIFIED)
+- /Users/ayemansingh/Desktop/Projects/sport-project/backend/modules/user/services/user.service.js (LANGUAGE_UNSPECIFIED)
+- /Users/ayemansingh/Desktop/Projects/sport-project/backend/tests/user.api.test.js (LANGUAGE_UNSPECIFIED)
+- /Users/ayemansingh/Desktop/Projects/sport-project/backend/tests/sports.test.js (LANGUAGE_UNSPECIFIED)
+- /Users/ayemansingh/Desktop/Projects/sport-project/backend/modules/user/models/userProfile.model.js (LANGUAGE_UNSPECIFIED)
+</ADDITIONAL_METADATA>
